@@ -996,6 +996,269 @@ DoSendPayload(AEGP_SuiteHandler &suites, const BridgeRequest *rP)
 }
 
 // ---------------------------------------------------------------------------
+//	C0.3 -- keyframes from native code  (UI thread only)
+// ---------------------------------------------------------------------------
+
+/*	THE QUESTION.
+
+	B2 measured, on 6,486 real keyframes, that writing VALUES is free and making
+	them MEAN what we meant is not:
+
+	    setValueAtTime in a loop      6,850 us/key
+	    setValuesAtTimes in bulk         19.6 us/key
+	    forcing LINEAR interpolation    853 us/key   <- no bulk form, not optional
+
+	So Wall I is the interpolation pass, and C0.3 asks whether AEGP_KeyframeSuite
+	beats it. Reading the suite sharpens the question before a line runs:
+	AEGP_SetKeyframeInterpolation is ALSO per-key, with no bulk form. The native
+	path is the same shape as the ExtendScript one.
+
+	Which means the spike is really asking: is 853 us/key the ExtendScript
+	BRIDGE, or is it AE doing the work? Only the first goes away by going
+	native. C0.2 found ExtendScript's per-character cost dominated everything
+	else, which is a reason to suspect the bridge -- but suspicion is not a
+	measurement, and a per-CALL tax is not a per-character one.
+
+	WHY IT BUILDS ITS OWN COMP.
+
+	The benchmark writes tens of thousands of keyframes. Doing that to whatever
+	the user has open would be rude at best, and it would also make the numbers
+	depend on their project. So it creates a scratch comp and a solid, measures
+	those, and deletes them -- inside ONE undo group, so anything it leaves
+	behind is a single Undo away.
+
+	WHY IT DOES NOT USE GetTickCount.
+
+	The rest of the bridge times with GetTickCount, whose ~15.6 ms resolution is
+	why every C0.2 number is a multiple of about fifteen. That is fine for a
+	100 ms transfer and useless here: at 853 us/key, a thousand keys is under
+	one tick. This uses QueryPerformanceCounter. */
+
+static double
+NowSeconds(void)
+{
+	LARGE_INTEGER	f, t;
+
+	QueryPerformanceFrequency(&f);
+	QueryPerformanceCounter(&t);
+	return (double)t.QuadPart / (double)f.QuadPart;
+}
+
+/*	Tear down whatever got built, in reverse. Written as one function called
+	from every exit because a spike that leaves a scratch comp behind on the
+	failure path teaches the user to distrust it -- and the failure path is the
+	one that runs when something is wrong. */
+static void
+BenchCleanup(AEGP_SuiteHandler	&suites,
+			 AEGP_StreamRefH	streamH,
+			 AEGP_ItemH			comp_itemH,
+			 AEGP_ItemH			solid_itemH)
+{
+	A_Err err2 = A_Err_NONE, err = A_Err_NONE;
+
+	if (streamH) {
+		ERR2(suites.StreamSuite2()->AEGP_DisposeStream(streamH));
+	}
+	if (comp_itemH) {
+		ERR2(suites.ItemSuite6()->AEGP_DeleteItem(comp_itemH));
+	}
+	if (solid_itemH) {
+		ERR2(suites.ItemSuite6()->AEGP_DeleteItem(solid_itemH));
+	}
+}
+
+//	{"cmd":"bench_keys","bytes":"N"}
+static void
+DoBenchKeys(AEGP_SuiteHandler &suites, const BridgeRequest *rP)
+{
+	A_Err			err		= A_Err_NONE,
+					err2	= A_Err_NONE;
+	AEGP_CompH		compH			= NULL;
+	AEGP_ItemH		comp_itemH		= NULL,
+					solid_itemH		= NULL,
+					root_folderH	= NULL;
+	AEGP_FootageH	footageH		= NULL;
+	AEGP_LayerH		layerH			= NULL;
+	AEGP_StreamRefH	streamH			= NULL;
+	AEGP_ProjectH	projH			= NULL;
+
+	long n = (long)strtol(rP->num, NULL, 10);
+
+	if (n < 1 || n > 200000) {
+		PipeWriteError("bench_keys needs \"bytes\" between 1 and 200000 "
+						"(it is a key count here, not a size)");
+		return;
+	}
+
+	//	One group for the whole thing, so a failure anywhere is one Undo away.
+	ERR(suites.UtilitySuite3()->AEGP_StartUndoGroup("PhysBridge C0.3 bench"));
+
+	ERR(suites.ProjSuite5()->AEGP_GetProjectByIndex(0, &projH));
+	ERR(suites.ProjSuite5()->AEGP_GetProjectRootFolder(projH, &root_folderH));
+
+	if (err) {
+		ERR2(suites.UtilitySuite3()->AEGP_EndUndoGroup());
+		PipeWriteError("could not reach the project root folder");
+		return;
+	}
+
+	//	30 fps, and long enough to hold every key plus a little slack.
+	A_Ratio	pixel_aspect	= { 1, 1 };
+	A_Ratio	framerate		= { 30, 1 };
+	A_Time	duration		= { n + 60, 30 };
+
+	//	UTF-16, because AEGP_CreateComp takes it. Built by hand rather than
+	//	dragging in a conversion for one ASCII literal.
+	const char	*nameZ = "PhysBridge C0.3 scratch";
+	A_UTF16Char	name16[64];
+	int			ni = 0;
+
+	for (; nameZ[ni] && ni < 63; ni++) {
+		name16[ni] = (A_UTF16Char)nameZ[ni];
+	}
+	name16[ni] = 0;
+
+	ERR(suites.CompSuite11()->AEGP_CreateComp(root_folderH, name16,
+			1000, 500, &pixel_aspect, &duration, &framerate, &compH));
+	ERR(suites.CompSuite11()->AEGP_GetItemFromComp(compH, &comp_itemH));
+
+	AEGP_ColorVal white = { 1.0, 1.0, 1.0, 1.0 };
+
+	ERR(suites.FootageSuite5()->AEGP_NewSolidFootage("c03 solid", 100, 100,
+			&white, &footageH));
+	ERR(suites.FootageSuite5()->AEGP_AddFootageToProject(footageH,
+			root_folderH, &solid_itemH));
+	ERR(suites.LayerSuite8()->AEGP_AddLayer(solid_itemH, compH, &layerH));
+	ERR(suites.StreamSuite2()->AEGP_GetNewLayerStream(S_my_id, layerH,
+			AEGP_LayerStream_POSITION, &streamH));
+
+	if (err) {
+		BenchCleanup(suites, streamH, comp_itemH, solid_itemH);
+		ERR2(suites.UtilitySuite3()->AEGP_EndUndoGroup());
+		PipeWriteError("could not build the scratch comp for the benchmark");
+		return;
+	}
+
+	//	Reported rather than assumed: B2 was bitten by a 2D Position whose
+	//	SPATIAL TANGENTS wanted three elements, so the arity belongs to the
+	//	call and not to the property.
+	A_short dim = 0;
+
+	ERR2(suites.KeyframeSuite4()->AEGP_GetStreamValueDimensionality(streamH,
+			&dim));
+
+	// -- phase 1: the batch add, the native answer to setValuesAtTimes -----
+	AEGP_AddKeyframesInfoH	akH = NULL;
+	double					t0 = NowSeconds();
+
+	ERR(suites.KeyframeSuite4()->AEGP_StartAddKeyframes(streamH, &akH));
+
+	for (long i = 0; !err && i < n; i++) {
+		A_Time	t		= { i, 30 };
+		A_long	index	= 0;
+
+		ERR(suites.KeyframeSuite4()->AEGP_AddKeyframes(akH,
+				AEGP_LTimeMode_LayerTime, &t, &index));
+
+		//	A ramp, so a wrong value is visible rather than plausible.
+		AEGP_StreamValue2 v;
+
+		AEFX_CLR_STRUCT(v);
+		v.streamH			= streamH;
+		v.val.three_d.x		= 100.0 + i;
+		v.val.three_d.y		= 250.0 + (i % 100);
+		v.val.three_d.z		= 0.0;
+
+		ERR(suites.KeyframeSuite4()->AEGP_SetAddKeyframe(akH, index, &v));
+	}
+	ERR(suites.KeyframeSuite4()->AEGP_EndAddKeyframes(TRUE, akH));
+
+	double add_s = NowSeconds() - t0;
+
+	if (err) {
+		BenchCleanup(suites, streamH, comp_itemH, solid_itemH);
+		ERR2(suites.UtilitySuite3()->AEGP_EndUndoGroup());
+		PipeWriteError("the batch add failed");
+		return;
+	}
+
+	//	Did they all land? A benchmark over fewer keys than it thinks is a
+	//	benchmark of nothing.
+	A_long stored = 0;
+
+	ERR2(suites.KeyframeSuite4()->AEGP_GetStreamNumKFs(streamH, &stored));
+
+	// -- phase 2: interpolation, which is the row Wall I cares about -------
+	t0 = NowSeconds();
+
+	for (long i = 0; !err && i < stored; i++) {
+		ERR(suites.KeyframeSuite4()->AEGP_SetKeyframeInterpolation(streamH, i,
+				AEGP_KeyInterp_LINEAR, AEGP_KeyInterp_LINEAR));
+	}
+	double interp_s = NowSeconds() - t0;
+
+	// -- phase 3: zeroing the spatial tangents, the other half of B2's pass -
+	AEGP_StreamValue2 zero;
+
+	AEFX_CLR_STRUCT(zero);
+	zero.streamH = streamH;
+
+	t0 = NowSeconds();
+
+	for (long i = 0; !err && i < stored; i++) {
+		ERR(suites.KeyframeSuite4()->AEGP_SetKeyframeSpatialTangents(streamH,
+				i, &zero, &zero));
+	}
+	double tan_s = NowSeconds() - t0;
+
+	//	Read one back. Fast and wrong is not a result.
+	AEGP_KeyframeInterpolationType	in_interp	= AEGP_KeyInterp_NONE,
+									out_interp	= AEGP_KeyInterp_NONE;
+	A_long							probe		= stored / 2;
+
+	if (stored > 0) {
+		ERR2(suites.KeyframeSuite4()->AEGP_GetKeyframeInterpolation(streamH,
+				probe, &in_interp, &out_interp));
+	}
+
+	A_Err bench_err = err;
+
+	BenchCleanup(suites, streamH, comp_itemH, solid_itemH);
+	ERR2(suites.UtilitySuite3()->AEGP_EndUndoGroup());
+
+	if (bench_err) {
+		char m[128];
+		sprintf_s(m, sizeof(m), "the benchmark failed part-way (err %ld) "
+					"after %ld keys", (long)bench_err, (long)stored);
+		PipeWriteError(m);
+		return;
+	}
+
+	char msg[640];
+
+	sprintf_s(msg, sizeof(msg),
+		"{\"ok\":true,\"asked\":%ld,\"stored\":%ld,\"dim\":%d,"
+		"\"add_us_per_key\":%.1f,\"interp_us_per_key\":%.1f,"
+		"\"tangent_us_per_key\":%.1f,\"add_s\":%.3f,\"interp_s\":%.3f,"
+		"\"tangent_s\":%.3f,\"interp_readback\":%ld}",
+		n, (long)stored, (int)dim,
+		stored ? add_s	  * 1e6 / stored : 0.0,
+		stored ? interp_s * 1e6 / stored : 0.0,
+		stored ? tan_s	  * 1e6 / stored : 0.0,
+		add_s, interp_s, tan_s, (long)in_interp);
+
+	Log("  bench_keys: %ld keys, add %.1f us, interp %.1f us, tangents "
+		"%.1f us per key\n", (long)stored,
+		stored ? add_s * 1e6 / stored : 0.0,
+		stored ? interp_s * 1e6 / stored : 0.0,
+		stored ? tan_s * 1e6 / stored : 0.0);
+
+	S_last_result_len	= (long)stored;
+	S_last_ms			= (long)((add_s + interp_s + tan_s) * 1000.0);
+	PipeWriteLine(msg);
+}
+
+// ---------------------------------------------------------------------------
 //	pipe server  (background thread)
 // ---------------------------------------------------------------------------
 
@@ -1232,6 +1495,8 @@ IdleHook(AEGP_GlobalRefcon, AEGP_IdleRefcon, A_long *max_sleepPL)
 			DoSendPayload(suites, &r);
 		} else if (!strcmp(r.cmd, "pipe_probe")) {
 			DoPipeProbe(&r);
+		} else if (!strcmp(r.cmd, "bench_keys")) {
+			DoBenchKeys(suites, &r);
 		} else if (!strcmp(r.cmd, "_overflow")) {
 			PipeWriteError("the request line exceeded the bridge's cap and "
 							"was refused");

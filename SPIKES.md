@@ -338,8 +338,74 @@ Run inside After Effects on 2026-09-08. `read_scene` was untouched, so C0.1
 stays runnable, and the corrected init label is now live in the log
 (`AEGP driver 126.3`).
 
-## C0.3 — keyframes from native code — not started
+## C0.3 — keyframes from native code — **harness built, not yet run**
 
 Can `AEGP_KeyframeSuite` beat ExtendScript's measured 853 µs/key interpolation
 cost? Wall I's only remaining lever, and fracture makes it a requirement rather
 than an optimisation: fifty shards is ~25 s of interpolation alone.
+
+### Reading the suite sharpened the question before any code ran
+
+B2's measurement, from `WALKTHROUGH.md`:
+
+| | µs per key | 12,000 keys |
+|---|---|---|
+| `setValueAtTime` in a loop | 6,850 | 82 s |
+| `setValuesAtTimes` in bulk | 19.6 | 0.2 s |
+| forcing LINEAR interpolation | 853 | 10 s |
+
+The value writes are already free; the interpolation pass is Wall I. And
+`AEGP_KeyframeSuite5` turns out to have **the same shape**: there is a batch add
+(`StartAddKeyframes` / `AddKeyframes` / `SetAddKeyframe` / `EndAddKeyframes`,
+the native `setValuesAtTimes`), but `AEGP_SetKeyframeInterpolation` is
+**per-key with no bulk form either**.
+
+So going native does not change the *shape* of the work — it changes who pays
+for each call, which makes the real question:
+
+> **Is 853 µs/key the ExtendScript bridge, or is it AE doing the work?**
+
+Only the first goes away. C0.2 found ExtendScript's per-character cost dominated
+everything around it, which is grounds for suspecting the bridge — but a
+per-character tax is not a per-call one, and suspicion is not a measurement.
+
+- near **20 µs/key** → Wall I is solved and fracture becomes affordable.
+- near **853** → the cost is AE's, native buys nothing, and the answer is
+  decimation or AE's default-interpolation preference, which B2 flagged as
+  untested and still is.
+
+### How it measures
+
+`bench_keys` times three phases separately, because lumping them would hide
+which one is the problem — and B2's whole finding was that the phases differ by
+two orders of magnitude:
+
+| phase | the ExtendScript it is compared against |
+|---|---|
+| batch add | `setValuesAtTimes`, 19.6 µs/key |
+| interpolation | `setInterpolationTypeAtKey`, 853 µs/key |
+| spatial tangents | the other half of B2's pass, zeroed so the path cannot bow |
+
+Tangents are included deliberately. Leaving them out would have made the native
+path look better than it is, since B2 pays for them too.
+
+**It builds its own scratch comp and solid, times those, and deletes them**, all
+inside one undo group. Writing tens of thousands of keyframes into whatever the
+user has open would be rude, and it would make the numbers depend on their
+project rather than on AE.
+
+**Timed with `QueryPerformanceCounter`**, not the `GetTickCount` the rest of the
+bridge uses. That clock's ~15.6 ms resolution is why every C0.2 number is a
+multiple of about fifteen; at 853 µs/key a thousand keys is under one tick, so
+it would have measured nothing here.
+
+It reads a keyframe back before reporting — fast and wrong is not a result — and
+reports the stream's dimensionality rather than assuming it, since B2 was bitten
+by a 2D Position whose *spatial tangents* demanded three elements.
+
+### Status
+
+Builds clean. **Not yet run inside After Effects.** `AEGP_CreateComp` and the
+solid-footage calls are new API surface for this plug-in and comp creation is
+the step most likely to fail first; if it does, that is a bug in the setup code,
+not a finding about keyframes.

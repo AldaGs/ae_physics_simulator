@@ -126,6 +126,7 @@ Newline-delimited JSON, one request and one reply.
 | `{"cmd":"size_probe","bytes":"N","echo":"1"}` | the N bytes themselves, for the return direction |
 | `{"cmd":"send_payload","script":"<abs path>","mode":"literal"｜"file"}` | the same report, for a real file |
 | `{"cmd":"pipe_probe","data":"<the payload, inline>"}` | what arrived — length, checksum, head and tail |
+| `{"cmd":"bench_keys","bytes":"N"}` | C0.3 timings — µs/key for the add, the interpolation and the tangents |
 
 Every value is a quoted string, including the numbers, so the request reader
 stays the one thing that only knows how to pull a quoted value.
@@ -167,6 +168,16 @@ number covering both would describe neither.
 
 `sweep` doubles until AE refuses and then bisects, because the useful form of
 "where it breaks" is a byte count, not a doubling step.
+
+## Running C0.3
+
+Nothing of yours is touched: the bridge builds a scratch comp and solid, times
+them, and deletes them inside one undo group.
+
+```
+python c03_client.py bench              # 1,000 / 3,000 / 6,486 / 12,000 keys
+python c03_client.py bench --keys 6486  # B2's exact key count
+```
 
 ## The one change this forced on the ExtendScript
 
