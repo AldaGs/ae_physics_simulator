@@ -122,8 +122,15 @@ Newline-delimited JSON, one request and one reply.
 |---|---|
 | `{"cmd":"ping"}` | `{"ok":true,"pong":true}` |
 | `{"cmd":"read_scene","script":"<abs path to .jsx>"}` | the scene JSON, or `{"ok":false,"error":"..."}` |
+| `{"cmd":"size_probe","bytes":"N","mode":"literal"｜"file"}` | a C0.2 report — what was sent, what the script saw |
+| `{"cmd":"size_probe","bytes":"N","echo":"1"}` | the N bytes themselves, for the return direction |
+| `{"cmd":"send_payload","script":"<abs path>","mode":"literal"｜"file"}` | the same report, for a real file |
 
-The client is `python-proto/physics_sim/c01_client.py` in the planning repo.
+Every value is a quoted string, including the numbers, so the request reader
+stays the one thing that only knows how to pull a quoted value.
+
+The clients are `python-proto/physics_sim/c01_client.py` and `c02_client.py` in
+the planning repo.
 
 ## Running the spike
 
@@ -138,6 +145,21 @@ one sitting:
    python c01_client.py read_scene --out c01_bridge.json
    python c01_client.py verify c01_dialog.json c01_bridge.json
    ```
+
+## Running C0.2
+
+No comp is needed and nothing in the project is touched — the probe generates or
+reads its own payload and only measures how it travels.
+
+```
+python c02_client.py payload b2_bake.json   # the real bake, both roads
+python c02_client.py sweep                  # the ceiling, in
+python c02_client.py sweep --mode file
+python c02_client.py echo                   # the ceiling, out
+```
+
+`sweep` doubles until AE refuses and then bisects, because the useful form of
+"where it breaks" is a byte count, not a doubling step.
 
 ## The one change this forced on the ExtendScript
 
@@ -163,3 +185,10 @@ ExtendScript is reused rather than rebuilt.
 See `SPIKES.md` for the numbers and, more usefully, for what the result does
 **not** prove: C0.2's 148 KB payload question is still open, since this run
 moved 15.9 KB in and 2.2 KB out.
+
+**C0.2's harness is built but not yet run.** It measures both ways the bake
+could reach `b2_apply_bake.jsx` — escaped into the script text, or via a temp
+file the script opens — on the real 145,090-byte `b2_bake.json`, and sweeps for
+the ceiling in each direction. B2 already reads its bake from a file, so the
+question is not whether that road works but whether the other one is worth
+taking. `SPIKES.md` has the design and what the number will and will not cover.

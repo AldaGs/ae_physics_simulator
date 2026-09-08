@@ -10,6 +10,10 @@
 	    -> ReadFileUtf8 + AEGP_ExecuteScript            [AE UI thread]
 	    -> PipeWrite of the script's return value       [AE UI thread]
 	  client reads one newline-terminated line from TX
+
+  C0.2 adds size_probe and send_payload, which take exactly that route.
+  They differ only in what reaches AEGP_ExecuteScript: a payload escaped
+  into the script text, or a path the script opens for itself.
 */
 
 #include "PhysBridge.h"
@@ -398,6 +402,442 @@ DoReadScene(AEGP_SuiteHandler &suites, const char *scriptPathZ)
 }
 
 // ---------------------------------------------------------------------------
+//	C0.2 -- payload size  (UI thread only)
+// ---------------------------------------------------------------------------
+
+/*	THE QUESTION, in the form it actually takes.
+
+	B2 already reads its bake from a file: File.openDialog -> read() -> eval.
+	So "must the script read a temp file?" is not asking whether the file path
+	WORKS -- it demonstrably does, by hand, today. It is asking whether the
+	alternative, handing the bake to AEGP_ExecuteScript as part of the script
+	text, is viable and buys anything. If it is not, B2 needs the same one-line
+	prelude B1 got and nothing more.
+
+	So the probe measures both ingestion paths on the SAME payload:
+
+	  literal   the bytes are escaped into a string literal in the script
+	  file      the script opens a path and reads it
+
+	and it measures them on the real b2_bake.json, not only on synthetic bytes,
+	because 145,090 bytes of numeric JSON is the payload the answer is for.
+
+	INTEGRITY, NOT JUST SURVIVAL. A truncated payload that still parses is how
+	this question gets a false pass, so the script checksums what it received
+	and the bridge compares that against a checksum of what it sent. Length
+	alone would miss a mangled escape; a checksum alone would miss nothing, but
+	head and tail markers say WHERE a truncation happened, which is the
+	difference between a number and a diagnosis. */
+
+//	The rolling checksum, defined here and in PROBE_BODY below, and the two must
+//	stay identical. It runs over UTF-16 code units on the script side, so it can
+//	only agree for ASCII input -- the caller is told when the payload is not.
+static unsigned long
+ChecksumAscii(const char *sP, size_t len)
+{
+	unsigned long long h = 0;
+
+	for (size_t i = 0; i < len; i++) {
+		h = (h * 31 + (unsigned char)sP[i]) % 4294967296ULL;
+	}
+	return (unsigned long)h;
+}
+
+static A_Boolean
+IsAscii(const char *sP, size_t len)
+{
+	for (size_t i = 0; i < len; i++) {
+		if ((unsigned char)sP[i] > 0x7F) {
+			return FALSE;
+		}
+	}
+	return TRUE;
+}
+
+//	Char codes as hex, the same way the script reports its own head and tail.
+//	Hex rather than the characters themselves because the payload is JSON: its
+//	first bytes are a brace and a quote, and pasting those into a reply would be
+//	an injection into the very format the reply is written in.
+static void
+HexCodes(const char *sP, size_t len, char *outZ, size_t out_max)
+{
+	size_t o = 0;
+
+	for (size_t i = 0; i < len && o + 5 < out_max; i++) {
+		sprintf_s(outZ + o, out_max - o, "%04x", (unsigned char)sP[i]);
+		o += 4;
+	}
+	outZ[o] = 0;
+}
+
+//	Escape a byte range into the body of a JavaScript string literal. Worst case
+//	is six bytes out per byte in, which is what the allocation assumes. Bytes
+//	>= 0x80 pass through untouched: the script text reaches AE as UTF-8 and a
+//	multi-byte sequence must survive whole.
+static char *
+EscapeToLiteral(const char *srcP, size_t len, size_t *out_lenP)
+{
+	size_t	cap  = len * 6 + 1;
+	char	*dstP = (char *)malloc(cap);
+
+	if (!dstP) {
+		return NULL;
+	}
+	size_t o = 0;
+
+	for (size_t i = 0; i < len; i++) {
+		unsigned char c = (unsigned char)srcP[i];
+
+		switch (c) {
+			case '\\':	dstP[o++] = '\\'; dstP[o++] = '\\';	break;
+			case '"':	dstP[o++] = '\\'; dstP[o++] = '"';	break;
+			case '\n':	dstP[o++] = '\\'; dstP[o++] = 'n';	break;
+			case '\r':	dstP[o++] = '\\'; dstP[o++] = 'r';	break;
+			case '\t':	dstP[o++] = '\\'; dstP[o++] = 't';	break;
+			default:
+				if (c < 0x20) {
+					sprintf_s(dstP + o, cap - o, "\\u%04x", c);
+					o += 6;
+				} else {
+					dstP[o++] = (char)c;
+				}
+		}
+	}
+	dstP[o] = 0;
+
+	if (out_lenP) {
+		*out_lenP = o;
+	}
+	return dstP;
+}
+
+/*	The half of the probe script that does not depend on how the payload got
+	there. Everything above it must leave the payload in PHYS_P.
+
+	ms_sum and ms_eval are timed separately from the bridge's own stopwatch,
+	because they answer a different question: the bridge measures the cost of
+	the whole transfer, and these measure how much of it is ExtendScript being
+	ExtendScript. If eval of 145 KB dominates, the choice between literal and
+	file barely matters and the spike should say so.
+
+	eval is what B2 already does with the bake, so parsing here is not extra
+	work invented for the probe -- it is the cost B2 pays either way, and a
+	payload that arrives intact but cannot be parsed is still a failure. */
+static const char PROBE_BODY[] =
+	"(function(){\n"
+	"  function hx(s){var o='';for(var i=0;i<s.length;i++){"
+	"var c=s.charCodeAt(i).toString(16);"
+	"while(c.length<4)c='0'+c;o+=c;}return o;}\n"
+	"  var n=PHYS_P.length;\n"
+	"  var t0=new Date().getTime();\n"
+	"  var h=0;\n"
+	"  for(var i=0;i<n;i++)h=(h*31+PHYS_P.charCodeAt(i))%4294967296;\n"
+	"  var t1=new Date().getTime();\n"
+	"  var ev=-1,keys=-1,perr='';\n"
+	"  if(PHYS_EVAL){\n"
+	"    var t2=new Date().getTime();\n"
+	"    try{var ob=eval('('+PHYS_P+')');keys=0;for(var k in ob)keys++;}\n"
+	"    catch(e){perr=String(e.message||e);}\n"
+	"    ev=new Date().getTime()-t2;\n"
+	"  }\n"
+	"  var s='{\"chars\":'+n+',\"sum\":'+h+',\"ms_sum\":'+(t1-t0)\n"
+	"    +',\"ms_eval\":'+ev+',\"keys\":'+keys\n"
+	"    +',\"head\":\"'+hx(PHYS_P.substr(0,16))+'\"'\n"
+	"    +',\"tail\":\"'+hx(PHYS_P.substr(n>16?n-16:0))+'\"'\n"
+	"    +',\"parse_error\":\"'+perr.replace(/[\\\\\"]/g,' ')+'\"}';\n"
+	"  if(PHYS_ECHO)return PHYS_P;\n"
+	"  return s;\n"
+	"})()\n";
+
+//	Synthetic bytes for the sweep: a cycle of safe ASCII. A repeating pattern
+//	would hide a reordering, which is what the checksum is for, and the sweep is
+//	asking about the ceiling rather than fidelity -- the real bake is what
+//	fidelity gets measured on.
+static char *
+MakeSynthetic(size_t n)
+{
+	static const char ALPHA[] =
+		"0123456789abcdefghijklmnopqrstuvwxyz"
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZ.,:;-_/";
+	const size_t	na	= sizeof(ALPHA) - 1;
+	char			*bP	= (char *)malloc(n + 1);
+
+	if (!bP) {
+		return NULL;
+	}
+	for (size_t i = 0; i < n; i++) {
+		bP[i] = ALPHA[i % na];
+	}
+	bP[n] = 0;
+	return bP;
+}
+
+/*	Run one probe.
+
+	payloadP is what the script must end up holding. In file mode it is NOT
+	sent -- it is written to a temp file and the script reads it back -- so the
+	checksum still compares what the bridge intended against what the script
+	saw, and both modes are measured against the same ruler.
+
+	The reply is a JSON object rather than a bare payload, because the numbers
+	ARE the result here. echo is the one exception and returns the payload, so
+	the return direction can be measured on its own. */
+static void
+RunProbe(AEGP_SuiteHandler	&suites,
+		 const char			*modeZ,
+		 const char			*payloadP,
+		 size_t				 payload_len,
+		 A_Boolean			 do_eval,
+		 A_Boolean			 do_echo)
+{
+	A_Err			err		= A_Err_NONE,
+					err2	= A_Err_NONE;
+	AEGP_MemHandle	resultH	= NULL,
+					errorH	= NULL;
+	A_Boolean		is_file	= (0 == strcmp(modeZ, "file"));
+	char			*headerP = NULL;
+
+	//	What was sent, measured before anything can mangle it.
+	unsigned long	sum_sent	= ChecksumAscii(payloadP, payload_len);
+	A_Boolean		ascii		= IsAscii(payloadP, payload_len);
+	size_t			edge		= (payload_len < 16) ? payload_len : 16;
+	char			head_sent[80], tail_sent[80];
+
+	HexCodes(payloadP, edge, head_sent, sizeof(head_sent));
+	HexCodes(payloadP + payload_len - edge, edge, tail_sent, sizeof(tail_sent));
+
+	if (is_file) {
+		char	dirZ[MAX_PATH];
+		char	tmpZ[MAX_PATH];
+
+		if (!GetTempPathA(sizeof(dirZ), dirZ)) {
+			PipeWriteError("GetTempPath failed");
+			return;
+		}
+		sprintf_s(tmpZ, sizeof(tmpZ), "%sphysbridge_c02_payload.json", dirZ);
+
+		FILE *f = NULL;
+
+		if (fopen_s(&f, tmpZ, "wb") || !f) {
+			PipeWriteError("cannot write the temp payload file");
+			return;
+		}
+		size_t wrote = fwrite(payloadP, 1, payload_len, f);
+		fclose(f);
+
+		if (wrote != payload_len) {
+			PipeWriteError("short write to the temp payload file");
+			return;
+		}
+
+		//	Forward slashes: ExtendScript's File takes a URI-ish path, and a
+		//	backslash inside a literal is an escape waiting to be misread.
+		char	fwdZ[MAX_PATH];
+		size_t	fi = 0;
+
+		for (const char *p = tmpZ; *p && fi + 1 < sizeof(fwdZ); p++) {
+			fwdZ[fi++] = (*p == '\\') ? '/' : *p;
+		}
+		fwdZ[fi] = 0;
+
+		size_t cap = MAX_PATH + 256;
+		headerP = (char *)malloc(cap);
+
+		if (headerP) {
+			sprintf_s(headerP, cap,
+				"var PHYS_EVAL=%s;var PHYS_ECHO=%s;\n"
+				"var PHYS_F=new File(\"%s\");PHYS_F.encoding=\"UTF-8\";\n"
+				"PHYS_F.open(\"r\");var PHYS_P=PHYS_F.read();PHYS_F.close();\n",
+				do_eval ? "true" : "false", do_echo ? "true" : "false", fwdZ);
+		}
+	} else {
+		size_t	esc_len	= 0;
+		char	*escP	= EscapeToLiteral(payloadP, payload_len, &esc_len);
+
+		if (!escP) {
+			PipeWriteError("out of memory escaping the payload");
+			return;
+		}
+		size_t cap = esc_len + 128;
+		headerP = (char *)malloc(cap);
+
+		if (headerP) {
+			int k = sprintf_s(headerP, cap,
+				"var PHYS_EVAL=%s;var PHYS_ECHO=%s;var PHYS_P=\"",
+				do_eval ? "true" : "false", do_echo ? "true" : "false");
+			memcpy(headerP + k, escP, esc_len);
+			memcpy(headerP + k + esc_len, "\";\n", 4);
+		}
+		free(escP);
+	}
+	if (!headerP) {
+		PipeWriteError("out of memory building the probe script");
+		return;
+	}
+
+	size_t	head_len	= strlen(headerP);
+	size_t	script_len	= head_len + sizeof(PROBE_BODY) - 1;
+	char	*scriptP	= (char *)malloc(script_len + 1);
+
+	if (!scriptP) {
+		free(headerP);
+		PipeWriteError("out of memory assembling the probe script");
+		return;
+	}
+	memcpy(scriptP, headerP, head_len);
+	memcpy(scriptP + head_len, PROBE_BODY, sizeof(PROBE_BODY));
+	free(headerP);
+
+	Log("  probe: mode=%s payload=%llu bytes, script=%llu bytes\n",
+		modeZ, (unsigned long long)payload_len,
+		(unsigned long long)script_len);
+
+	DWORD t0 = GetTickCount();
+
+	ERR(suites.UtilitySuite6()->AEGP_ExecuteScript(S_my_id, scriptP, FALSE,
+													&resultH, &errorH));
+	S_last_ms = (long)(GetTickCount() - t0);
+	free(scriptP);
+
+	//	The same trap as C0.1: on success this handle is non-NULL with an EMPTY
+	//	string, so the string decides, never the handle.
+	if (errorH) {
+		A_char *t = NULL;
+
+		if (!suites.MemorySuite1()->AEGP_LockMemHandle(errorH,
+					reinterpret_cast<void**>(&t)) && t && t[0]) {
+			Log("  probe ERROR at %llu bytes: %s\n",
+				(unsigned long long)payload_len, t);
+			PipeWriteError(t);
+			ERR2(suites.MemorySuite1()->AEGP_UnlockMemHandle(errorH));
+			ERR2(suites.MemorySuite1()->AEGP_FreeMemHandle(errorH));
+
+			if (resultH) {
+				ERR2(suites.MemorySuite1()->AEGP_FreeMemHandle(resultH));
+			}
+			return;
+		}
+		ERR2(suites.MemorySuite1()->AEGP_UnlockMemHandle(errorH));
+		ERR2(suites.MemorySuite1()->AEGP_FreeMemHandle(errorH));
+	}
+	if (err) {
+		//	The ceiling, if there is one, is expected to appear here.
+		char m[192];
+		sprintf_s(m, sizeof(m),
+			"AEGP_ExecuteScript failed (err %ld) at %llu bytes of payload, "
+			"%llu bytes of script", (long)err,
+			(unsigned long long)payload_len, (unsigned long long)script_len);
+		PipeWriteError(m);
+		return;
+	}
+	if (!resultH) {
+		PipeWriteError("the probe script returned no value");
+		return;
+	}
+
+	A_char *t = NULL;
+
+	if (!suites.MemorySuite1()->AEGP_LockMemHandle(resultH,
+				reinterpret_cast<void**>(&t)) && t) {
+		size_t n = strlen(t);
+		S_last_result_len = (long)n;
+
+		Log("  probe: %llu bytes back in %ld ms\n",
+			(unsigned long long)n, S_last_ms);
+
+		if (do_echo) {
+			//	The return direction, measured alone. The reply IS the payload,
+			//	so the client checksums it rather than reading a verdict.
+			PipeWrite(t, n);
+			PipeWrite("\n", 1);
+		} else {
+			/*	The script's report and the bridge's own account of what it
+				sent, in one object. The client compares the two halves; the
+				bridge deliberately does not pronounce a verdict, because
+				"sum_sent != sum" and "chars != bytes_sent" mean different
+				things and only one of them is a failure. */
+			size_t	cap		= n + 768;
+			char	*replyP	= (char *)malloc(cap);
+
+			if (replyP) {
+				sprintf_s(replyP, cap,
+					"{\"ok\":true,\"mode\":\"%s\",\"bytes_sent\":%llu,"
+					"\"script_bytes\":%llu,\"ms\":%ld,\"ascii\":%s,"
+					"\"sum_sent\":%lu,\"head_sent\":\"%s\","
+					"\"tail_sent\":\"%s\",\"script\":%s}",
+					modeZ, (unsigned long long)payload_len,
+					(unsigned long long)script_len, S_last_ms,
+					ascii ? "true" : "false", sum_sent, head_sent, tail_sent,
+					t);
+				PipeWriteLine(replyP);
+				free(replyP);
+			} else {
+				PipeWriteError("out of memory building the probe reply");
+			}
+		}
+		S_last_error[0] = 0;
+	} else {
+		PipeWriteError("could not lock the probe result");
+	}
+	ERR2(suites.MemorySuite1()->AEGP_UnlockMemHandle(resultH));
+	ERR2(suites.MemorySuite1()->AEGP_FreeMemHandle(resultH));
+}
+
+//	{"cmd":"size_probe","bytes":"N","mode":"literal"|"file","echo":"1"}
+static void
+DoSizeProbe(AEGP_SuiteHandler &suites, const BridgeRequest *rP)
+{
+	size_t n = (size_t)strtoull(rP->num, NULL, 10);
+
+	if (!n) {
+		PipeWriteError("size_probe needs a positive \"bytes\"");
+		return;
+	}
+	char *bufP = MakeSynthetic(n);
+
+	if (!bufP) {
+		//	Said explicitly, because a spike that reports the harness running
+		//	out of memory as AE's ceiling has measured nothing.
+		char m[128];
+		sprintf_s(m, sizeof(m),
+			"the BRIDGE could not allocate %llu bytes -- this is the probe's "
+			"limit, not AE's", (unsigned long long)n);
+		PipeWriteError(m);
+		return;
+	}
+	//	No eval on synthetic bytes: they are not JSON, and the sweep asks about
+	//	the transfer ceiling, not about the parser.
+	RunProbe(suites, rP->mode[0] ? rP->mode : "literal", bufP, n,
+			 FALSE, rP->echo);
+	free(bufP);
+}
+
+//	{"cmd":"send_payload","script":"<path>","mode":"literal"|"file"}
+//	The real one: b2_bake.json through both ingestion paths.
+static void
+DoSendPayload(AEGP_SuiteHandler &suites, const BridgeRequest *rP)
+{
+	size_t	len	  = 0;
+	char	*bufP = ReadFileUtf8(rP->arg, &len);
+
+	if (!bufP) {
+		char m[MAX_PATH + 64];
+		sprintf_s(m, sizeof(m), "cannot read payload: %s", rP->arg);
+		PipeWriteError(m);
+		return;
+	}
+	if (!len) {
+		free(bufP);
+		PipeWriteError("the payload file is empty");
+		return;
+	}
+	//	This payload IS JSON, so it is parsed -- that is the cost B2 pays.
+	RunProbe(suites, rP->mode[0] ? rP->mode : "literal", bufP, len,
+			 TRUE, rP->echo);
+	free(bufP);
+}
+
+// ---------------------------------------------------------------------------
 //	pipe server  (background thread)
 // ---------------------------------------------------------------------------
 
@@ -413,7 +853,18 @@ HandleLine(const char *lineZ)
 		return;
 	}
 	JsonStr(lineZ, "\"script\":", r.arg, sizeof(r.arg));
-	Log("  rx: cmd=%s arg=%s\n", r.cmd, r.arg);
+	JsonStr(lineZ, "\"bytes\":", r.num, sizeof(r.num));
+	JsonStr(lineZ, "\"mode\":", r.mode, sizeof(r.mode));
+
+	//	Sent as a quoted string like every other field, so the reader stays
+	//	the one that only knows how to pull a quoted value.
+	char echoZ[8] = { 0 };
+
+	if (JsonStr(lineZ, "\"echo\":", echoZ, sizeof(echoZ))) {
+		r.echo = (echoZ[0] == '1' || echoZ[0] == 't') ? TRUE : FALSE;
+	}
+	Log("  rx: cmd=%s arg=%s bytes=%s mode=%s echo=%d\n", r.cmd,
+		r.arg, r.num, r.mode, (int)r.echo);
 	QueuePush(&r);
 }
 
@@ -577,6 +1028,10 @@ IdleHook(AEGP_GlobalRefcon, AEGP_IdleRefcon, A_long *max_sleepPL)
 
 		if (!strcmp(r.cmd, "read_scene")) {
 			DoReadScene(suites, r.arg);
+		} else if (!strcmp(r.cmd, "size_probe")) {
+			DoSizeProbe(suites, &r);
+		} else if (!strcmp(r.cmd, "send_payload")) {
+			DoSendPayload(suites, &r);
 		} else if (!strcmp(r.cmd, "ping")) {
 			PipeWriteLine("{\"ok\":true,\"pong\":true}");
 		} else {
@@ -599,7 +1054,7 @@ CommandHook(AEGP_GlobalRefcon, AEGP_CommandRefcon, AEGP_Command command,
 		char				msg[1024];
 
 		sprintf_s(msg, sizeof(msg),
-			"PhysBridge C0.1 spike\r\r"
+			"PhysBridge C0 spike\r\r"
 			"pipe: %s\r"
 			"requests served: %ld\r"
 			"last result: %ld bytes in %ld ms\r"

@@ -11,8 +11,13 @@
 	native bridge inside it, with B1/B2's already-verified .jsx files reused
 	rather than rebuilt as evalScript calls. If no, Phase C changes shape.
 
-	THROWAWAY. One command, no settings, no persistence, Windows only. It exists
-	to answer a question, and the answer belongs in the plan, not in this code.
+	C0.1 is answered -- PASS, see SPIKES.md. C0.2 asks the follow-on that the
+	pass could not: how large a payload AEGP_ExecuteScript will take, and
+	whether escaping the bake into the script text beats the temp file that
+	b2_apply_bake.jsx already reads from.
+
+	THROWAWAY. No settings, no persistence, Windows only. It exists to answer
+	questions, and the answers belong in the plan, not in this code.
 
 	WHAT IT BORROWS FROM pieFX  (Examples/Template/pieFX/poc/native)
 	---------------------------------------------------------------
@@ -71,8 +76,12 @@
 
 //	A request, parsed on the pipe thread and executed on the UI thread.
 typedef struct {
-	char	cmd[32];
-	char	arg[MAX_PATH];		// for read_scene: the .jsx path
+	char		cmd[32];
+	char		arg[MAX_PATH];	// read_scene: the .jsx path;
+								// send_payload: the payload file
+	char		num[24];		// size_probe: how many bytes to synthesise
+	char		mode[16];		// C0.2 ingestion path: "literal" or "file"
+	A_Boolean	echo;			// C0.2: return the payload, not a report
 } BridgeRequest;
 
 extern "C" {

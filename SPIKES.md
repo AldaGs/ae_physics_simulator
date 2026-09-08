@@ -98,10 +98,76 @@ predates that change**, which is cosmetic and touches nothing on the tested path
 
 ---
 
-## C0.2 — payload size — not started
+## C0.2 — payload size — **harness built, not yet run**
 
-Does `AEGP_ExecuteScript` accept a 148 KB bake as a string argument, or must the
-script read a temp file? Measure **where it breaks**, not just whether it works.
+### The question, in the form it actually takes
+
+The roadmap asks: does `AEGP_ExecuteScript` accept a 148 KB bake as a string
+argument, or must the script read a temp file?
+
+Reading `b2_apply_bake.jsx` sharpens that. B2 **already** reads its bake from a
+file — `File.openDialog` → `read()` → `eval` — so the temp-file road is not a
+hypothesis to be tested; it is the incumbent, and it works today by hand. The
+open question is whether the *other* road is viable: escaping the bake into the
+script text and handing the whole thing over in one call.
+
+That matters because the two roads lead to different products:
+
+- **literal** — the shell hands the bake to the AEGP and nothing touches the
+  disk. No temp file to write, collide on, or clean up.
+- **file** — B2 gets the same one-line prelude B1 got (`var PHYS_BAKE_PATH` in
+  place of the dialog) and the bake goes via `%TEMP%`.
+
+Either answer is cheap to act on. Not knowing is what costs.
+
+### What the harness measures
+
+Three commands on the bridge, driven by `python-proto/physics_sim/c02_client.py`:
+
+| | |
+|---|---|
+| `size_probe` | N synthetic bytes in, a small report back — the sweep |
+| `size_probe` + `echo` | N bytes in, the same N bytes back — the *return* direction |
+| `send_payload` | the real `b2_bake.json` (145,090 bytes), both roads |
+
+The sweep doubles until AE refuses and then **bisects**, because "somewhere
+between 8 MB and 16 MB" is not a limit anyone can design to. The number wanted
+is a byte count.
+
+### Integrity, not just survival
+
+A payload that arrives truncated and still parses is exactly how a size
+question gets a false pass — which is the whole lesson of C0.1's 2 KB. So:
+
+- the script checksums what it received; the bridge checksums what it sent;
+  the client compares the two. The rolling checksum is written three times, in
+  C++, in the probe's ExtendScript, and in the client, and all three agree —
+  verified offline against a real JSON payload before AE was involved.
+- `head` and `tail` are the first and last sixteen character codes, so a
+  failure reads as "cut at the end" or "the escaping mangled the front" rather
+  than just "differs".
+- the real bake is `eval`ed, because that is the cost B2 pays either way, and a
+  payload that arrives intact but will not parse is still a failure.
+- `chars` vs `bytes_sent` is deliberately **not** treated as corruption on its
+  own. ExtendScript counts UTF-16 code units and the bridge counts bytes, so
+  they agree only for ASCII; the bridge reports which it was.
+
+### What it will not measure
+
+**The pipe.** The payload is generated or read *inside* the bridge, so the
+ceiling this produces belongs to `AEGP_ExecuteScript` and nothing else. Moving
+a 145 KB bake from the shell to the bridge is a separate limit —
+`PHYSBRIDGE_LINE_MAX` is 64 KB — and it is one line to raise, or moot if the
+shell passes a path. Conflating the two would produce a number that describes
+neither.
+
+### Status
+
+Built clean, `EntryPointFunc` still exported bare, and the generated probe
+script verified under `node` against a real JSON payload — chars, checksum,
+head, tail, key count and `eval` all correct. **It has not been run inside After
+Effects**, which is the only place the answer exists. Nothing below the line in
+C0.1 is affected: `read_scene` is untouched.
 
 ## C0.3 — keyframes from native code — not started
 
