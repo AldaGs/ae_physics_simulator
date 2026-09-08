@@ -343,6 +343,51 @@ ReadFileUtf8(const char *pathZ, size_t *lenP)
 	return buf;
 }
 
+/*	Put back what the prelude changed.
+
+	Every script the bridge runs is prefixed with globals -- PHYS_RETURN_JSON
+	for the reader, PHYS_P and friends for the probes -- and ExtendScript's
+	global scope is not scoped to the script. It lives as long as the AE
+	session, shared with every script the user runs by hand.
+
+	Two things go wrong if it is left alone, and the first one cost a test:
+
+	  - b1_read_shapes.jsx decides between "save through a dialog" and "return
+	    the string" by testing PHYS_RETURN_JSON. Leave it set and a MANUAL run
+	    keeps taking the bridge path: it returns the string, saves nothing, and
+	    shows no dialog, with no error to explain why.
+	  - PHYS_P holds the probe payload, so a 32 MB probe leaves 32 MB alive in
+	    AE for the rest of the session.
+
+	Cleared in its own ExecuteScript rather than appended to the script, because
+	an appended line does not run when the script throws -- which is exactly
+	when a stale flag does the most damage. Assignment rather than `var`: the
+	reader's guard is `typeof PHYS_RETURN_JSON !== "undefined" && ...`, and a
+	value of false fails its second half. */
+static void
+ClearBridgeGlobals(AEGP_SuiteHandler &suites)
+{
+	//	Both, because ERR2 folds err2 into err. Neither is inspected: a failure
+	//	to clear is worth no reply of its own, and must not overwrite the
+	//	caller's, which is the actual result.
+	A_Err			err		= A_Err_NONE,
+					err2	= A_Err_NONE;
+	AEGP_MemHandle	resultH	= NULL,
+					errorH	= NULL;
+
+	ERR2(suites.UtilitySuite6()->AEGP_ExecuteScript(S_my_id,
+			"PHYS_RETURN_JSON = false; PHYS_P = null; PHYS_F = null; "
+			"PHYS_EVAL = false; PHYS_ECHO = false;",
+			FALSE, &resultH, &errorH));
+
+	if (resultH) {
+		ERR2(suites.MemorySuite1()->AEGP_FreeMemHandle(resultH));
+	}
+	if (errorH) {
+		ERR2(suites.MemorySuite1()->AEGP_FreeMemHandle(errorH));
+	}
+}
+
 static void
 DoReadScene(AEGP_SuiteHandler &suites, const char *scriptPathZ)
 {
@@ -403,6 +448,9 @@ DoReadScene(AEGP_SuiteHandler &suites, const char *scriptPathZ)
 													&resultH, &errorH));
 	S_last_ms = (long)(GetTickCount() - t0);
 	free(codeZ);
+
+	//	Before any of the early returns below, so it happens on every path.
+	ClearBridgeGlobals(suites);
 
 	//	The documented trap: on SUCCESS this handle is non-NULL but its string
 	//	is empty. Testing the handle alone reports a failure on every good run.
@@ -763,6 +811,11 @@ RunProbe(AEGP_SuiteHandler	&suites,
 													&resultH, &errorH));
 	S_last_ms = (long)(GetTickCount() - t0);
 	free(scriptP);
+
+	//	Timed OUTSIDE the stopwatch above, so the measurement stays a
+	//	measurement of the transfer. PHYS_P holds the payload, so skipping this
+	//	would leave a 32 MB probe's bytes alive in AE for the whole session.
+	ClearBridgeGlobals(suites);
 
 	//	The same trap as C0.1: on success this handle is non-NULL with an EMPTY
 	//	string, so the string decides, never the handle.

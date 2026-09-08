@@ -182,6 +182,15 @@ AEGP started **inside its idle hook** would block AE waiting for a click nobody
 is there to give, so failures come back as a string the bridge turns into a JSON
 error.
 
+**The prelude is cleaned up after every run**, and that is not housekeeping.
+ExtendScript's global scope lives as long as the AE session, so a leftover
+`PHYS_RETURN_JSON` made a *manual* run of `b1_read_shapes.jsx` keep taking the
+bridge path — returning the string, saving nothing, showing no dialog, with
+nothing to explain it. The bridge now clears its globals (`PHYS_RETURN_JSON`,
+`PHYS_P`, `PHYS_F`, `PHYS_EVAL`, `PHYS_ECHO`) in a second, separate
+`ExecuteScript` — separate because an appended line does not run when the script
+throws, which is when a stale flag does the most damage.
+
 ## Status
 
 **C0.1 PASSES** (2026-09-07, AE 26.3x87). The bridge returned a scene document

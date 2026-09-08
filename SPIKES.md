@@ -89,6 +89,61 @@ keyframes onto those layers, so the reader now emits an extra warning about
 pre-existing Position keys. The comp used here (`sim 2`) is clean, which is why
 `warnings` is empty.
 
+### Re-verified 2026-09-08, and the defect that re-verifying found
+
+Re-run against the current binary, after the RX accumulator was rewritten and
+the globals fix went in — same comp, same sitting, byte-identical, and the same
+sha256 as the original:
+
+```
+dialog :    2185 bytes  sha256 b589df0b0325b543  c01_dialog_recheck.json
+bridge :    2185 bytes  sha256 b589df0b0325b543  c01_bridge_recheck2.json
+
+PASS  the bridge returns exactly what the save dialog writes
+```
+
+**The first attempt at this could not be done at all, and that was the finding.**
+The reader chooses its output path from a global:
+
+```javascript
+var BRIDGE = (typeof PHYS_RETURN_JSON !== "undefined") && PHYS_RETURN_JSON;
+```
+
+The bridge prepends `var PHYS_RETURN_JSON = true;`, and **ExtendScript's global
+scope lives as long as the AE session**, shared with every script the user runs
+by hand. So after any bridge read, a *manual* run of `b1_read_shapes.jsx` kept
+taking the bridge path: it returned the string, saved nothing, and showed no
+dialog — with no error to explain why.
+
+Two things follow, and the second is the one that matters:
+
+- **C0.1's procedure had an undocumented order dependency.** The original pass
+  ran the dialog first and the bridge second. Reversed, there is no dialog and
+  no file. "Both readings in one sitting" was never enough; the sitting was
+  ordered, and nothing said so.
+- **The bridge was mutating shared state inside AE.** In Phase C, anyone who ran
+  B1 by hand after using the app would have got no dialog and no saved file, and
+  nothing to diagnose it with. A defect in the product, not the spike.
+
+The same leak applied to C0.2's probes, where `PHYS_P` holds the payload — a
+32 MB probe left 32 MB alive in AE for the rest of the session.
+
+**Fixed:** every script the bridge runs is now followed by a second, tiny
+`ExecuteScript` that clears `PHYS_RETURN_JSON`, `PHYS_P`, `PHYS_F`, `PHYS_EVAL`
+and `PHYS_ECHO`. Its own call rather than an appended line, because an appended
+line does not run when the script throws — which is exactly when a stale flag
+does the most damage. It is called before every early return, and timed outside
+the C0.2 stopwatch so those numbers stay measurements of the transfer.
+
+The re-run above was deliberately done **bridge first, dialog second** — the
+order that used to fail. The dialog appeared. That is what makes this a
+demonstration of the fix rather than an assumption about it, and it means the
+same-sitting comparison no longer depends on order.
+
+C0.2 was re-measured on the fixed build too: 94–109 ms on both roads, the bake
+inline over the pipe in 13 ms, and the literal sweep still reaching 32 MB
+intact.
+
 ### Loose end
 
 The init line logs `AE 126.3`, which is not the application version — it is
@@ -216,10 +271,9 @@ client that never sends a newline, not a measurement.
 
 The RX accumulator sits underneath every request, so the results above were
 re-measured on the new build rather than inherited: `payload` gave 94 ms on both
-roads (unchanged), and all three sweeps still reach 32 MB intact. `read_scene`
-returned the script's own "select a composition" refusal — the error path works,
-but C0.1's byte-identical comparison was **not** re-run, since that needs a comp
-open and the save dialog in the same sitting.
+roads (unchanged), and all three sweeps still reach 32 MB intact. C0.1 was
+re-verified separately and passes byte-identically — see its section above, and
+the globals leak that re-verifying it exposed.
 
 ### What made the result trustworthy
 
