@@ -152,23 +152,74 @@ choice therefore falls to grounds other than speed:
   clean up, which is worth something to a shell that may run more than one sim.
 
 **Leaning file**, on the grounds that it is less code and less risk: escaping a
-payload into script text is an injection surface and up to a 2× size expansion,
-and it buys no time back. But this is now a design preference with a
-measurement behind it, not a gamble — which is the whole point of the spike.
+payload into script text that is then executed is a second place to get it
+wrong, and it buys no time back. (I also gave size expansion as a reason; the
+pipe measurement below withdraws that one — it costs 0.06%, not 2×.) This is now
+a design preference with a measurement behind it, not a gamble, which is the
+whole point of the spike.
 
-### The gap this opens, and it is the next thing to settle
+### The pipe — the other half, measured (2026-09-08)
 
-The literal road is **not usable end to end today**, for a reason outside what
-was measured. The payload here was generated or read *inside* the bridge, so
-this ceiling is `AEGP_ExecuteScript`'s alone. Getting the bake from the shell to
-the bridge is a different limit: `PHYSBRIDGE_LINE_MAX` is 64 KB, and
-`HandleLine` **drops** a longer request rather than truncating it. A 145 KB bake
-sent inline over the pipe would not arrive at all.
+The numbers above are `AEGP_ExecuteScript`'s alone: the payload was generated or
+read *inside* the bridge and never crossed the pipe. Getting the bake from the
+shell *into* the bridge was a separate limit, untested above 16 KB, and
+`PHYSBRIDGE_LINE_MAX` was a 64 KB constant that `HandleLine` enforced by
+**dropping** longer requests. That constant was arbitrary — it was written when
+every request was a path and a number — and leaving it to be read as a finding
+would have been the worst outcome, so the accumulator now grows on demand and
+the pipe was measured properly.
 
-That is one constant to raise — or moot, if the shell passes a path, which is
-the file road. It is called out here rather than quietly fixed because it is a
-measurement nobody has taken: **the pipe has not been tested above 16 KB in the
-request direction.**
+`pipe_probe` puts the payload in the request line itself, which is what a shell
+handing over a bake actually does, and touches no AEGP suite — so what it
+measures is the transport and the request reader, nothing else.
+
+```
+       16,384 B payload       16,418 B line    43 ms   intact
+      262,144 B payload      262,178 B line    19 ms   intact
+    4,194,304 B payload    4,194,338 B line    76 ms   intact
+   33,554,432 B payload   33,554,466 B line   426 ms   intact
+
+   no ceiling in the request direction below 33,554,432 bytes
+```
+
+**The pipe is not a constraint, and it is not even slow.** 32 MB inline in
+426 ms is about 79 MB/s — for scale, the ExtendScript checksum over that same
+32 MB took *sixteen seconds*. Below ~1 MB the numbers are a latency floor of
+20–45 ms (the idle hook's polling), not throughput.
+
+The real bake, inline, over three runs:
+
+```
+   145,090 B payload   145,206 B line   26 / 15 / 14 ms   intact
+```
+
+**This corrects something I argued above.** I gave "up to a 2× size expansion"
+as a reason to prefer the file road. Measured, the escaping costs **82 bytes on
+145,090 — 0.06%**, because `b2_bake.json` is one line of numeric JSON with 82
+quotes, no backslashes and no newlines. The 2× is a worst case that this payload
+comes nowhere near, so that argument is withdrawn. What survives is the
+structural one: the literal road escapes a payload into source that is then
+executed, so it has two places to get wrong where the file road has one.
+
+The over-cap path was checked too, since it is new behaviour and the old code
+failed silently:
+
+```
+   67,108,864  REFUSED: the request line exceeded the bridge's cap and was refused
+```
+
+Refused with a message rather than dropped without one — a request that vanishes
+in silence gets diagnosed as a hung bridge. The 64 MB cap is a guard against a
+client that never sends a newline, not a measurement.
+
+### Re-run after the change
+
+The RX accumulator sits underneath every request, so the results above were
+re-measured on the new build rather than inherited: `payload` gave 94 ms on both
+roads (unchanged), and all three sweeps still reach 32 MB intact. `read_scene`
+returned the script's own "select a composition" refusal — the error path works,
+but C0.1's byte-identical comparison was **not** re-run, since that needs a comp
+open and the save dialog in the same sitting.
 
 ### What made the result trustworthy
 

@@ -71,7 +71,17 @@
 #define PHYSBRIDGE_PIPE_TX		"\\\\.\\pipe\\aephys_bridge_tx"
 #define PHYSBRIDGE_PIPE_RX		"\\\\.\\pipe\\aephys_bridge_rx"
 
-#define PHYSBRIDGE_LINE_MAX		(1 << 16)	// request line; requests are tiny
+/*	The request line.
+
+	This was a fixed 64 KB stack buffer while every request was a path and a
+	number. C0.2 left the question of a request that CARRIES the bake open, and
+	an arbitrary constant is a poor way to answer it: the accumulator now grows
+	on demand, and the cap exists only so a client that never sends a newline
+	cannot exhaust memory. A line over the cap is reported, not silently
+	dropped -- a request that vanishes without a word is the kind of thing that
+	gets diagnosed as a hung bridge. */
+#define PHYSBRIDGE_LINE_START	(1 << 12)	// grows from here
+#define PHYSBRIDGE_LINE_CAP		(64 << 20)	// a guard, not a measurement
 #define PHYSBRIDGE_QUEUE_LEN	8
 
 //	A request, parsed on the pipe thread and executed on the UI thread.
@@ -82,6 +92,14 @@ typedef struct {
 	char		num[24];		// size_probe: how many bytes to synthesise
 	char		mode[16];		// C0.2 ingestion path: "literal" or "file"
 	A_Boolean	echo;			// C0.2: return the payload, not a report
+
+	/*	pipe_probe's inline payload, and the one field that is not a copy.
+		It is allocated on the pipe thread and freed on the UI thread, so
+		ownership MOVES with the request: whoever last holds it frees it, which
+		is the idle hook on the normal path and HandleLine when the queue is
+		full and the push is refused. */
+	char		*dataP;
+	size_t		data_len;
 } BridgeRequest;
 
 extern "C" {

@@ -76,11 +76,15 @@ Log(const char *fmtZ, ...)
 //	the request queue: written on the pipe thread, drained on AE's UI thread
 // ---------------------------------------------------------------------------
 
-static void
+//	Returns whether the request was taken. The caller keeps ownership of
+//	rP->dataP if it was not -- see BridgeRequest.
+static A_Boolean
 QueuePush(const BridgeRequest *rP)
 {
+	A_Boolean took = FALSE;
+
 	if (!S_cs_ready) {
-		return;
+		return FALSE;
 	}
 	EnterCriticalSection(&S_cs);
 
@@ -89,8 +93,10 @@ QueuePush(const BridgeRequest *rP)
 	if (next != S_q_head) {		//	drop rather than overwrite a pending one
 		S_queue[S_q_tail] = *rP;
 		S_q_tail = next;
+		took = TRUE;
 	}
 	LeaveCriticalSection(&S_cs);
+	return took;
 }
 
 static A_Boolean
@@ -155,6 +161,65 @@ JsonStr(const char *lineZ, const char *keyZ, char *outZ, size_t out_max)
 	}
 	outZ[o] = 0;
 	return (*p == '"') ? TRUE : FALSE;
+}
+
+/*	The same reader, for a value too big to land in a fixed field.
+
+	JsonStr's whole virtue is that it cannot overrun a caller's buffer; the
+	price is that it silently stops at the end of one. That is right for a path
+	and wrong for a payload, where stopping early IS the failure being measured
+	-- so this one allocates and reports the length it actually decoded.
+
+	Escapes are handled identically to JsonStr, and deliberately no more: a
+	real bake is full of \" and \\, so those two decide whether this works at
+	all, and inventing \u handling here that JsonStr does not have would make
+	the two readers disagree about the same wire format. */
+static char *
+JsonStrAlloc(const char *lineZ, const char *keyZ, size_t *out_lenP)
+{
+	const char *k = strstr(lineZ, keyZ);
+
+	if (!k) {
+		return NULL;
+	}
+	const char *p = k + strlen(keyZ);
+
+	while (*p == ' ' || *p == '\t') {
+		p++;
+	}
+	if (*p != '"') {
+		return NULL;
+	}
+	p++;
+
+	//	The decoded value can only be shorter than what remains of the line.
+	size_t	cap  = strlen(p) + 1;
+	char	*outP = (char *)malloc(cap);
+
+	if (!outP) {
+		return NULL;
+	}
+	size_t o = 0;
+
+	while (*p && *p != '"') {
+		if (*p == '\\' && p[1]) {
+			p++;
+			outP[o++] = (*p == 'n') ? '\n' : *p;	// \\ and \" and \n
+			p++;
+		} else {
+			outP[o++] = *p++;
+		}
+	}
+	outP[o] = 0;
+
+	if (*p != '"') {			//	unterminated: a truncated line, which is
+		free(outP);				//	exactly what this exists to detect
+		return NULL;
+	}
+	if (out_lenP) {
+		*out_lenP = o;
+	}
+	return outP;
 }
 
 // ---------------------------------------------------------------------------
@@ -812,6 +877,46 @@ DoSizeProbe(AEGP_SuiteHandler &suites, const BridgeRequest *rP)
 	free(bufP);
 }
 
+/*	{"cmd":"pipe_probe","data":"<the payload, inline>"}
+
+	C0.2 measured AEGP_ExecuteScript and said plainly that it had NOT measured
+	the pipe, because the payload never crossed it -- it was made or read inside
+	the bridge. This is that missing half: the payload arrives in the request
+	line itself, which is what a shell handing over a bake would actually do.
+
+	It touches no AEGP suite, so what it reports is the transport and the
+	request reader and nothing else. It still runs on the UI thread, with the
+	rest, so that a large request cannot be measured on a quieter thread than
+	the one it would really be served on. */
+static void
+DoPipeProbe(const BridgeRequest *rP)
+{
+	if (!rP->dataP) {
+		PipeWriteError("pipe_probe needs a \"data\" string -- none arrived, "
+						"which for a large request usually means the line was "
+						"cut before its closing quote");
+		return;
+	}
+	size_t			n		= rP->data_len;
+	size_t			edge	= (n < 16) ? n : 16;
+	char			head[80], tail[80];
+
+	HexCodes(rP->dataP, edge, head, sizeof(head));
+	HexCodes(rP->dataP + n - edge, edge, tail, sizeof(tail));
+
+	char msg[512];
+
+	sprintf_s(msg, sizeof(msg),
+		"{\"ok\":true,\"bytes_received\":%llu,\"sum\":%lu,"
+		"\"ascii\":%s,\"head\":\"%s\",\"tail\":\"%s\"}",
+		(unsigned long long)n, ChecksumAscii(rP->dataP, n),
+		IsAscii(rP->dataP, n) ? "true" : "false", head, tail);
+
+	S_last_result_len = (long)n;
+	Log("  pipe_probe: %llu bytes received inline\n", (unsigned long long)n);
+	PipeWriteLine(msg);
+}
+
 //	{"cmd":"send_payload","script":"<path>","mode":"literal"|"file"}
 //	The real one: b2_bake.json through both ingestion paths.
 static void
@@ -856,6 +961,11 @@ HandleLine(const char *lineZ)
 	JsonStr(lineZ, "\"bytes\":", r.num, sizeof(r.num));
 	JsonStr(lineZ, "\"mode\":", r.mode, sizeof(r.mode));
 
+	//	Only pipe_probe carries one, and only it pays for the allocation.
+	if (!strcmp(r.cmd, "pipe_probe")) {
+		r.dataP = JsonStrAlloc(lineZ, "\"data\":", &r.data_len);
+	}
+
 	//	Sent as a quoted string like every other field, so the reader stays
 	//	the one that only knows how to pull a quoted value.
 	char echoZ[8] = { 0 };
@@ -863,9 +973,12 @@ HandleLine(const char *lineZ)
 	if (JsonStr(lineZ, "\"echo\":", echoZ, sizeof(echoZ))) {
 		r.echo = (echoZ[0] == '1' || echoZ[0] == 't') ? TRUE : FALSE;
 	}
-	Log("  rx: cmd=%s arg=%s bytes=%s mode=%s echo=%d\n", r.cmd,
-		r.arg, r.num, r.mode, (int)r.echo);
-	QueuePush(&r);
+	Log("  rx: cmd=%s arg=%s bytes=%s mode=%s echo=%d data=%llu\n", r.cmd,
+		r.arg, r.num, r.mode, (int)r.echo, (unsigned long long)r.data_len);
+
+	if (!QueuePush(&r) && r.dataP) {
+		free(r.dataP);			//	refused, so it never moved -- see the struct
+	}
 }
 
 static DWORD WINAPI
@@ -922,10 +1035,12 @@ PipeServerThread(LPVOID)
 
 		{
 			char	buf[4096];
-			char	acc[PHYSBRIDGE_LINE_MAX];
-			size_t	acc_len = 0;
+			size_t	acc_cap	= PHYSBRIDGE_LINE_START;
+			size_t	acc_len	= 0;
+			char	*accP	= (char *)malloc(acc_cap);
+			A_Boolean over	= FALSE;
 
-			for (;;) {
+			for (; accP; ) {
 				DWORD got = 0;
 
 				if (!ReadFile(rx, buf, sizeof(buf), &got, NULL) || !got) {
@@ -935,21 +1050,51 @@ PipeServerThread(LPVOID)
 					char c = buf[i];
 
 					if (c == '\n') {
-						acc[acc_len] = 0;
-						if (acc_len) {
-							HandleLine(acc);
+						if (over) {
+							//	Say so on the wire. A request that disappears
+							//	in silence gets diagnosed as a hung bridge.
+							BridgeRequest r;
+
+							ZeroMemory(&r, sizeof(r));
+							strcpy_s(r.cmd, sizeof(r.cmd), "_overflow");
+							QueuePush(&r);
+							over = FALSE;
+						} else if (acc_len) {
+							accP[acc_len] = 0;
+							HandleLine(accP);
 						}
 						acc_len = 0;
-					} else if (acc_len + 1 < sizeof(acc)) {
-						acc[acc_len++] = c;
-					} else {
-						//	A request longer than the buffer is a protocol
-						//	error, not something to silently truncate.
-						Log("  rx: request too long, dropped\n");
-						acc_len = 0;
+						continue;
 					}
+					if (over) {
+						continue;		//	skip to the end of the bad line
+					}
+					if (acc_len + 2 > acc_cap) {
+						size_t want = acc_cap * 2;
+
+						if (want > PHYSBRIDGE_LINE_CAP) {
+							Log("  rx: request over %llu bytes, refused\n",
+								(unsigned long long)PHYSBRIDGE_LINE_CAP);
+							over = TRUE;
+							acc_len = 0;
+							continue;
+						}
+						char *bigP = (char *)realloc(accP, want);
+
+						if (!bigP) {
+							Log("  rx: out of memory growing to %llu\n",
+								(unsigned long long)want);
+							over = TRUE;
+							acc_len = 0;
+							continue;
+						}
+						accP	= bigP;
+						acc_cap	= want;
+					}
+					accP[acc_len++] = c;
 				}
 			}
+			free(accP);
 		}
 
 		Log("  pipe: client gone\n");
@@ -1032,12 +1177,20 @@ IdleHook(AEGP_GlobalRefcon, AEGP_IdleRefcon, A_long *max_sleepPL)
 			DoSizeProbe(suites, &r);
 		} else if (!strcmp(r.cmd, "send_payload")) {
 			DoSendPayload(suites, &r);
+		} else if (!strcmp(r.cmd, "pipe_probe")) {
+			DoPipeProbe(&r);
+		} else if (!strcmp(r.cmd, "_overflow")) {
+			PipeWriteError("the request line exceeded the bridge's cap and "
+							"was refused");
 		} else if (!strcmp(r.cmd, "ping")) {
 			PipeWriteLine("{\"ok\":true,\"pong\":true}");
 		} else {
 			char m[96];
 			sprintf_s(m, sizeof(m), "unknown cmd '%s'", r.cmd);
 			PipeWriteError(m);
+		}
+		if (r.dataP) {
+			free(r.dataP);		//	ownership ended here -- see BridgeRequest
 		}
 	}
 	return A_Err_NONE;

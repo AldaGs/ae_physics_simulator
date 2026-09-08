@@ -125,6 +125,7 @@ Newline-delimited JSON, one request and one reply.
 | `{"cmd":"size_probe","bytes":"N","mode":"literal"｜"file"}` | a C0.2 report — what was sent, what the script saw |
 | `{"cmd":"size_probe","bytes":"N","echo":"1"}` | the N bytes themselves, for the return direction |
 | `{"cmd":"send_payload","script":"<abs path>","mode":"literal"｜"file"}` | the same report, for a real file |
+| `{"cmd":"pipe_probe","data":"<the payload, inline>"}` | what arrived — length, checksum, head and tail |
 
 Every value is a quoted string, including the numbers, so the request reader
 stays the one thing that only knows how to pull a quoted value.
@@ -156,7 +157,13 @@ python c02_client.py payload b2_bake.json   # the real bake, both roads
 python c02_client.py sweep                  # the ceiling, in
 python c02_client.py sweep --mode file
 python c02_client.py echo                   # the ceiling, out
+python c02_client.py pipe                   # the ceiling, over the pipe
+python c02_client.py pipe --real            # the real bake, inline
 ```
+
+`sweep`, `echo` and `payload` measure `AEGP_ExecuteScript` — their payload never
+crosses the pipe. `pipe` measures the pipe, and touches no AEGP suite. One
+number covering both would describe neither.
 
 `sweep` doubles until AE refuses and then bisects, because the useful form of
 "where it breaks" is a byte count, not a doubling step.
@@ -196,6 +203,9 @@ What costs is ExtendScript touching characters, not bytes crossing the boundary:
 at 33 MB, 15.6 s of the 16.1 s was the probe's own checksum loop. For the bake,
 `eval` is ~22 ms and the transfer itself is under one clock tick.
 
-One gap this opens: the *pipe* has not been tested above 16 KB in the request
-direction, and `PHYSBRIDGE_LINE_MAX` is 64 KB, so a bake sent inline would be
-dropped today. `SPIKES.md` has the numbers and the road recommendation.
+The pipe was the other half, and it is measured too: no ceiling below **32 MB**
+in the request direction either, at about 79 MB/s, with the real bake arriving
+inline in ~15 ms. The old 64 KB `PHYSBRIDGE_LINE_MAX` was an arbitrary constant
+from when every request was a path and a number; the accumulator now grows on
+demand, and an over-cap line is refused *with a message* instead of dropped in
+silence. `SPIKES.md` has the numbers and the road recommendation.
