@@ -338,7 +338,13 @@ Run inside After Effects on 2026-09-08. `read_scene` was untouched, so C0.1
 stays runnable, and the corrected init label is now live in the log
 (`AEGP driver 126.3`).
 
-## C0.3 — keyframes from native code — **harness built, not yet run**
+## C0.3 — keyframes from native code — **measured, not yet recorded**
+
+> ⚠️ **Do not run `c03_client.py bench` as it stands.** The full sweep exhausted
+> memory on the test machine badly enough to require a restart. The harness
+> needs the fixes in "What went wrong" below before it is run again. The
+> measurements it produced are believed sound and are summarised there; they are
+> deliberately not written up as a result yet.
 
 Can `AEGP_KeyframeSuite` beat ExtendScript's measured 853 µs/key interpolation
 cost? Wall I's only remaining lever, and fracture makes it a requirement rather
@@ -403,9 +409,52 @@ It reads a keyframe back before reporting — fast and wrong is not a result —
 reports the stream's dimensionality rather than assuming it, since B2 was bitten
 by a 2D Position whose *spatial tangents* demanded three elements.
 
-### Status
+### What went wrong, and it was the harness
 
-Builds clean. **Not yet run inside After Effects.** `AEGP_CreateComp` and the
-solid-footage calls are new API surface for this plug-in and comp creation is
-the step most likely to fail first; if it does, that is a bug in the setup code,
-not a finding about keyframes.
+The full sweep — eight benchmarks back to back, four key counts × two modes —
+exhausted memory on the test machine and forced a restart. Three causes, all
+mine, and the first is visible in the SDK header if you read it for anything
+other than signatures:
+
+- **Every call in `AEGP_KeyframeSuite` is marked `/* UNDOABLE */`.** At 12,000
+  keys × four phases that is ~48,000 undoable operations for AE to retain, and
+  because the scratch comp is deleted *inside* the same undo group, AE must keep
+  all of it alive to be able to undo the deletion.
+- **`AEGP_SetKeyframeFlag` is O(n²)** (see below). 12,000 calls each apparently
+  re-walking a 12,000-key array is enormous allocation churn; that phase alone
+  took 90 s on the last run, up from 33 s on the one before, which was itself
+  the machine already struggling.
+- **Nothing was purged between runs**, so eight of these accumulated.
+
+Before it runs again: end the undo group *before* deleting the comp, cap at
+6,486 (B2's real key count — 12,000 was always extrapolation), skip `mode=full`
+at large counts since its answer is already known, and run one size per
+invocation.
+
+### What was measured, pending write-up
+
+Believed sound, but recorded here as observations rather than as a result:
+
+- **`AEGP_SetKeyframeFlag(SPATIAL_AUTOBEZIER)` is superlinear** — 151 µs/key at
+  1,000 keys rising to 3,197 at 12,000, i.e. O(n²) overall. Called per key as
+  B2 does it, native is *worse* than ExtendScript at scale.
+- **It is also unnecessary.** `AEGP_SetKeyframeSpatialTangents` appears to clear
+  the flag itself, and dropping the call leaves the pass flat at ~70–85 µs/key
+  across a 12× range — about **10×** faster than ExtendScript's 853.
+- **Verified clean at 3,000 keys, `nobezier`:** 66 sampled keys, 0 not LINEAR,
+  0 still auto-bezier, worst tangent magnitude 0.0. That is the load-bearing
+  claim confirmed, but at 3,000 keys and **not** at 12,000.
+
+### Two instrumentation faults worth remembering
+
+Both produced confident, wrong headlines before being caught:
+
+1. **Comparing one native phase against B2's three-call pass.** B2's
+   `makeLinear()` sets the interpolation type, clears spatial auto-bezier and
+   zeroes the tangents, and its 853 µs/key covers all three. Timing only the
+   interpolation natively and dividing gave "49× faster" — a third of the work
+   measured against the whole of it.
+2. **`interp_readback` reports one named key, and the sampler steps past it.**
+   It read 0, meaning "never sampled", on a run where all 66 sampled keys were
+   clean — and 0 is indistinguishable from total failure. The client now judges
+   the sampled counts and ignores that field.

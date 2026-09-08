@@ -169,15 +169,16 @@ number covering both would describe neither.
 `sweep` doubles until AE refuses and then bisects, because the useful form of
 "where it breaks" is a byte count, not a doubling step.
 
-## Running C0.3
+## Running C0.3 -- NOT YET
 
-Nothing of yours is touched: the bridge builds a scratch comp and solid, times
-them, and deletes them inside one undo group.
+**Do not run the sweep as it stands.** It exhausted memory on the test machine
+badly enough to require a restart: every call in `AEGP_KeyframeSuite` is
+`UNDOABLE`, the scratch comp is deleted *inside* the undo group so AE retains
+all of it, and `AEGP_SetKeyframeFlag` turns out to be O(n^2). Eight benchmarks
+back to back with nothing purged between them was too much.
 
-```
-python c03_client.py bench              # 1,000 / 3,000 / 6,486 / 12,000 keys
-python c03_client.py bench --keys 6486  # B2's exact key count
-```
+`SPIKES.md` has what it measured before that, what needs fixing first, and the
+two instrumentation faults that produced confident wrong answers along the way.
 
 ## The one change this forced on the ExtendScript
 

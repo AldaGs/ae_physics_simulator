@@ -1197,7 +1197,42 @@ DoBenchKeys(AEGP_SuiteHandler &suites, const BridgeRequest *rP)
 	}
 	double interp_s = NowSeconds() - t0;
 
-	// -- phase 3: zeroing the spatial tangents, the other half of B2's pass -
+	/*	-- phase 3: clearing spatial auto-bezier ---------------------------
+
+		B2's makeLinear() makes THREE calls per Position key, not one:
+
+		    setInterpolationTypeAtKey(i, LINEAR, LINEAR)
+		    setSpatialAutoBezierAtKey(i, false)
+		    setSpatialTangentsAtKey(i, zero, zero)
+
+		and its 853 us/key covers all three. Timing only the first natively
+		and comparing it to that number would be measuring a third of the work
+		against all of it. So this phase exists to make the comparison honest,
+		not because anyone asked for it. */
+	/*	Skippable, because the first run showed this call is where the whole
+		cost lives and that its per-key price GROWS with the key count --
+		167 us/key at 1,000 and 2,765 at 12,000, which is O(n^2) overall.
+		Something inside it walks the keyframe list every time.
+
+		So `mode: "nobezier"` omits it, and the flag read-back below then
+		answers the question that decides everything: does
+		AEGP_SetKeyframeSpatialTangents clear SPATIAL_AUTOBEZIER by itself? If
+		it does, this call is redundant natively and the quadratic term goes
+		away. If it does not, the flag comes back SET and native loses. */
+	A_Boolean	do_bezier = strcmp(rP->mode, "nobezier") != 0;
+	double		bezier_s  = -1.0;
+
+	if (do_bezier) {
+		t0 = NowSeconds();
+
+		for (long i = 0; !err && i < stored; i++) {
+			ERR(suites.KeyframeSuite4()->AEGP_SetKeyframeFlag(streamH, i,
+					AEGP_KeyframeFlag_SPATIAL_AUTOBEZIER, FALSE));
+		}
+		bezier_s = NowSeconds() - t0;
+	}
+
+	// -- phase 4: zeroing the spatial tangents ----------------------------
 	AEGP_StreamValue2 zero;
 
 	AEFX_CLR_STRUCT(zero);
@@ -1211,14 +1246,98 @@ DoBenchKeys(AEGP_SuiteHandler &suites, const BridgeRequest *rP)
 	}
 	double tan_s = NowSeconds() - t0;
 
-	//	Read one back. Fast and wrong is not a result.
+	/*	Read one back. Fast and wrong is not a result -- and A5's lesson,
+		restated by B2 inside AE, is that the fault hides between keyframes:
+		every stored value can be perfect while the path bows. The
+		interpolation type alone would not catch that, so the SPATIAL_AUTOBEZIER
+		flag is read back too. If it is still set, the pass did not take and
+		the timings describe work that achieved nothing. */
 	AEGP_KeyframeInterpolationType	in_interp	= AEGP_KeyInterp_NONE,
 									out_interp	= AEGP_KeyInterp_NONE;
+	AEGP_KeyframeFlags				flags		= AEGP_KeyframeFlag_NONE;
 	A_long							probe		= stored / 2;
 
+	/*	Sampled, not spot-checked.
+
+		The claim this benchmark exists to support -- that the auto-bezier call
+		is redundant because setting the tangents clears the flag -- would rest
+		on ONE keyframe if this read back only the middle one. B2 samples every
+		17th key for exactly that reason, and the fault list it calibrates
+		against includes a single dropped keyframe that a coarser check stepped
+		straight over.
+
+		So this walks a spread of keys and reports the WORST it saw. The last
+		key is always included: an endpoint is where AE is most likely to treat
+		a keyframe differently, and it is the cheapest place for this to be
+		wrong without anyone noticing.
+
+		The tangents themselves are read, not just the flag. A cleared flag
+		with a non-zero tangent still bows the path, and that is the fault A5
+		spent a whole phase learning to see. */
+	double	tan_mag		= -1.0;			// the worst magnitude seen
+	long	checked		= 0,
+			bad_interp	= 0,
+			bad_flag	= 0;
+
 	if (stored > 0) {
-		ERR2(suites.KeyframeSuite4()->AEGP_GetKeyframeInterpolation(streamH,
-				probe, &in_interp, &out_interp));
+		const long	WANT = 64;
+		long		step = stored / WANT;
+
+		if (step < 1) {
+			step = 1;
+		}
+		for (long i = 0; i < stored; i += step) {
+			//	Forced onto the final key on the last pass, rather than
+			//	wherever the stride happens to land.
+			long k = (i + step >= stored) ? (stored - 1) : i;
+
+			AEGP_KeyframeInterpolationType	ki = AEGP_KeyInterp_NONE,
+											ko = AEGP_KeyInterp_NONE;
+			AEGP_KeyframeFlags				kf = AEGP_KeyframeFlag_NONE;
+
+			ERR2(suites.KeyframeSuite4()->AEGP_GetKeyframeInterpolation(
+					streamH, k, &ki, &ko));
+			ERR2(suites.KeyframeSuite4()->AEGP_GetKeyframeFlags(streamH, k,
+					&kf));
+
+			if (ki != AEGP_KeyInterp_LINEAR || ko != AEGP_KeyInterp_LINEAR) {
+				bad_interp++;
+			}
+			if (kf & AEGP_KeyframeFlag_SPATIAL_AUTOBEZIER) {
+				bad_flag++;
+			}
+			if (k == probe) {			//	kept verbatim for the record
+				in_interp	= ki;
+				out_interp	= ko;
+				flags		= kf;
+			}
+
+			AEGP_StreamValue2 in_tan, out_tan;
+
+			AEFX_CLR_STRUCT(in_tan);
+			AEFX_CLR_STRUCT(out_tan);
+
+			if (!suites.KeyframeSuite4()->AEGP_GetNewKeyframeSpatialTangents(
+					S_my_id, streamH, k, &in_tan, &out_tan)) {
+				double a = in_tan.val.three_d.x,  b = in_tan.val.three_d.y,
+					   c = out_tan.val.three_d.x, d = out_tan.val.three_d.y;
+				double m = (a < 0 ? -a : a) + (b < 0 ? -b : b)
+						 + (c < 0 ? -c : c) + (d < 0 ? -d : d);
+
+				if (m > tan_mag) {
+					tan_mag = m;
+				}
+				//	StreamSuite6: earlier versions dispose the OLD
+				//	AEGP_StreamValue, which is a different type.
+				ERR2(suites.StreamSuite6()->AEGP_DisposeStreamValue(&in_tan));
+				ERR2(suites.StreamSuite6()->AEGP_DisposeStreamValue(&out_tan));
+			}
+			checked++;
+
+			if (k == stored - 1) {
+				break;
+			}
+		}
 	}
 
 	A_Err bench_err = err;
@@ -1239,22 +1358,32 @@ DoBenchKeys(AEGP_SuiteHandler &suites, const BridgeRequest *rP)
 	sprintf_s(msg, sizeof(msg),
 		"{\"ok\":true,\"asked\":%ld,\"stored\":%ld,\"dim\":%d,"
 		"\"add_us_per_key\":%.1f,\"interp_us_per_key\":%.1f,"
-		"\"tangent_us_per_key\":%.1f,\"add_s\":%.3f,\"interp_s\":%.3f,"
-		"\"tangent_s\":%.3f,\"interp_readback\":%ld}",
+		"\"bezier_us_per_key\":%.1f,\"tangent_us_per_key\":%.1f,"
+		"\"add_s\":%.3f,\"interp_s\":%.3f,\"bezier_s\":%.3f,"
+		"\"tangent_s\":%.3f,\"interp_readback\":%ld,\"flags_readback\":%ld,"
+		"\"tangent_magnitude\":%.4f,\"bezier_ran\":%s,"
+		"\"keys_checked\":%ld,\"bad_interp\":%ld,\"bad_flag\":%ld,"
+		"\"spatial_autobezier_still_set\":%s}",
 		n, (long)stored, (int)dim,
-		stored ? add_s	  * 1e6 / stored : 0.0,
-		stored ? interp_s * 1e6 / stored : 0.0,
-		stored ? tan_s	  * 1e6 / stored : 0.0,
-		add_s, interp_s, tan_s, (long)in_interp);
+		stored ? add_s	   * 1e6 / stored : 0.0,
+		stored ? interp_s  * 1e6 / stored : 0.0,
+		stored ? bezier_s  * 1e6 / stored : 0.0,
+		stored ? tan_s	   * 1e6 / stored : 0.0,
+		add_s, interp_s, bezier_s, tan_s, (long)in_interp, (long)flags,
+		tan_mag, do_bezier ? "true" : "false",
+		checked, bad_interp, bad_flag,
+		(flags & AEGP_KeyframeFlag_SPATIAL_AUTOBEZIER) ? "true" : "false");
 
-	Log("  bench_keys: %ld keys, add %.1f us, interp %.1f us, tangents "
-		"%.1f us per key\n", (long)stored,
+	Log("  bench_keys: %ld keys, add %.1f, interp %.1f, bezier %.1f, "
+		"tangents %.1f us per key\n", (long)stored,
 		stored ? add_s * 1e6 / stored : 0.0,
 		stored ? interp_s * 1e6 / stored : 0.0,
+		stored ? bezier_s * 1e6 / stored : 0.0,
 		stored ? tan_s * 1e6 / stored : 0.0);
 
 	S_last_result_len	= (long)stored;
-	S_last_ms			= (long)((add_s + interp_s + tan_s) * 1000.0);
+	S_last_ms			= (long)((add_s + interp_s + tan_s
+									+ (do_bezier ? bezier_s : 0.0)) * 1000.0);
 	PipeWriteLine(msg);
 }
 
