@@ -659,7 +659,9 @@ EntryPointFunc(
 	InitializeCriticalSection(&S_cs);
 	S_cs_ready = TRUE;
 
-	Log("\nPhysBridge: init (AE %ld.%ld)\n", (long)major_versionL,
+	//	These are the DRIVER version, not the application version -- the first
+	//	run logged "AE 126.3" next to an AE that calls itself 26.3x87.
+	Log("\nPhysBridge: init (AEGP driver %ld.%ld)\n", (long)major_versionL,
 		(long)minor_versionL);
 
 	AEGP_SuiteHandler suites(pica_basicP);

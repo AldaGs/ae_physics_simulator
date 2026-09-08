@@ -155,5 +155,11 @@ error.
 
 ## Status
 
-Builds clean, exports a bare `EntryPointFunc`, client written and failing
-cleanly when AE is absent. **Not yet run in After Effects.**
+**C0.1 PASSES** (2026-09-07, AE 26.3x87). The bridge returned a scene document
+byte-identical to the save dialog's — 2,185 bytes, same sha256, 16 ms for the
+whole round trip inside AE. Phase C's architecture stands, and B1/B2's
+ExtendScript is reused rather than rebuilt.
+
+See `SPIKES.md` for the numbers and, more usefully, for what the result does
+**not** prove: C0.2's 148 KB payload question is still open, since this run
+moved 15.9 KB in and 2.2 KB out.
