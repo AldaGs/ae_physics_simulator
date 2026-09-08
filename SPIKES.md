@@ -98,7 +98,96 @@ predates that change**, which is cosmetic and touches nothing on the tested path
 
 ---
 
-## C0.2 — payload size — **harness built, not yet run**
+## C0.2 — payload size — **PASS** (2026-09-08, AE 26.3x87)
+
+**The answer: there is no ceiling anywhere near the bake.** Both roads carry the
+real 145,090-byte `b2_bake.json` intact, and neither has a limit below **32 MB**
+— 231× the bake — in either direction. The sweep never got to bisect.
+
+```
+b2_bake.json -- 145,090 bytes, both ingestion paths
+
+  literal   145,090 B  script  146,048 B   93 ms  sum  64 ms  eval  20 ms  4 keys  intact
+  file      145,090 B  script    1,030 B   93 ms  sum  65 ms  eval  24 ms  4 keys  intact
+```
+
+Five repeats: literal 93–109 ms, file 94–109 ms. The two roads are **the same
+speed**, and the difference between them is smaller than the instrument can
+see — the bridge times with `GetTickCount`, whose resolution is ~15.6 ms, which
+is why every number in the sweeps is a multiple of about 15.
+
+The sweeps, doubling from 16 KB to 32 MB, all intact at every step:
+
+```
+literal   33,554,432 B  script 33,555,309 B  16094 ms  sum 15604 ms  intact
+file      33,554,432 B  script      1,031 B  15781 ms  sum 15688 ms  intact
+echo      33,554,432 B  back   33,554,432 B  16847 ms                intact
+```
+
+### What the timings actually say, which is not what they look like
+
+Almost all of that wall time is **the probe's own checksum**, not transport. At
+33 MB the literal road took 16,094 ms and the ExtendScript checksum loop
+accounted for 15,604 ms of it — so moving 32 MB into AE cost something like
+490 ms, and the measurement is mostly measuring the ruler.
+
+That is the real finding underneath the ceiling. Cost here scales with
+**ExtendScript touching characters**, not with bytes crossing a boundary. The
+checksum ran at roughly 0.45 µs per character; transport barely registers.
+
+For the bake specifically: of ~94 ms, about 66 ms is the checksum (the probe's,
+which B2 will never run) and ~22 ms is `eval` (which B2 already pays today,
+either way). What remains for the transfer itself is under one tick of the
+clock — **below the resolution of the instrument**, in both roads.
+
+### So which road?
+
+The measurement does **not** pick a winner: they cost the same. It only
+establishes that the literal road is *viable*, which was the open question. The
+choice therefore falls to grounds other than speed:
+
+- **file** — B2 already works this way, so it needs only the one-line prelude B1
+  got. The request stays tiny. Nothing is escaped into code.
+- **literal** — nothing touches the disk: no temp file to write, collide on, or
+  clean up, which is worth something to a shell that may run more than one sim.
+
+**Leaning file**, on the grounds that it is less code and less risk: escaping a
+payload into script text is an injection surface and up to a 2× size expansion,
+and it buys no time back. But this is now a design preference with a
+measurement behind it, not a gamble — which is the whole point of the spike.
+
+### The gap this opens, and it is the next thing to settle
+
+The literal road is **not usable end to end today**, for a reason outside what
+was measured. The payload here was generated or read *inside* the bridge, so
+this ceiling is `AEGP_ExecuteScript`'s alone. Getting the bake from the shell to
+the bridge is a different limit: `PHYSBRIDGE_LINE_MAX` is 64 KB, and
+`HandleLine` **drops** a longer request rather than truncating it. A 145 KB bake
+sent inline over the pipe would not arrive at all.
+
+That is one constant to raise — or moot, if the shell passes a path, which is
+the file road. It is called out here rather than quietly fixed because it is a
+measurement nobody has taken: **the pipe has not been tested above 16 KB in the
+request direction.**
+
+### What made the result trustworthy
+
+Every run checks integrity, not just survival, because a truncated payload that
+still parses is C0.1's false pass wearing a different hat. The probe script
+checksums what it received, the bridge checksums what it sent, and the client
+compares them; head and tail character codes would have located any cut. The
+checksum is written three times — C++, ExtendScript, Python — and all three were
+made to agree **offline under `node`** against a real JSON payload before AE was
+involved. `eval` is included because a payload that arrives intact but will not
+parse is still a failure; all runs reported `4 keys` and no parse error.
+
+One thing deliberately not treated as corruption: `chars` ≠ `bytes_sent`.
+ExtendScript counts UTF-16 code units and the bridge counts bytes, so they agree
+only for ASCII — the bridge reports which it was, and the client decides.
+
+---
+
+## C0.2 — how it was built
 
 ### The question, in the form it actually takes
 
@@ -134,40 +223,15 @@ The sweep doubles until AE refuses and then **bisects**, because "somewhere
 between 8 MB and 16 MB" is not a limit anyone can design to. The number wanted
 is a byte count.
 
-### Integrity, not just survival
-
-A payload that arrives truncated and still parses is exactly how a size
-question gets a false pass — which is the whole lesson of C0.1's 2 KB. So:
-
-- the script checksums what it received; the bridge checksums what it sent;
-  the client compares the two. The rolling checksum is written three times, in
-  C++, in the probe's ExtendScript, and in the client, and all three agree —
-  verified offline against a real JSON payload before AE was involved.
-- `head` and `tail` are the first and last sixteen character codes, so a
-  failure reads as "cut at the end" or "the escaping mangled the front" rather
-  than just "differs".
-- the real bake is `eval`ed, because that is the cost B2 pays either way, and a
-  payload that arrives intact but will not parse is still a failure.
-- `chars` vs `bytes_sent` is deliberately **not** treated as corruption on its
-  own. ExtendScript counts UTF-16 code units and the bridge counts bytes, so
-  they agree only for ASCII; the bridge reports which it was.
-
-### What it will not measure
-
-**The pipe.** The payload is generated or read *inside* the bridge, so the
-ceiling this produces belongs to `AEGP_ExecuteScript` and nothing else. Moving
-a 145 KB bake from the shell to the bridge is a separate limit —
-`PHYSBRIDGE_LINE_MAX` is 64 KB — and it is one line to raise, or moot if the
-shell passes a path. Conflating the two would produce a number that describes
-neither.
+The integrity checking, and the reason the pipe was kept out of scope, are
+described under the result above — they are what make the number mean
+something, so they belong next to it.
 
 ### Status
 
-Built clean, `EntryPointFunc` still exported bare, and the generated probe
-script verified under `node` against a real JSON payload — chars, checksum,
-head, tail, key count and `eval` all correct. **It has not been run inside After
-Effects**, which is the only place the answer exists. Nothing below the line in
-C0.1 is affected: `read_scene` is untouched.
+Run inside After Effects on 2026-09-08. `read_scene` was untouched, so C0.1
+stays runnable, and the corrected init label is now live in the log
+(`AEGP driver 126.3`).
 
 ## C0.3 — keyframes from native code — not started
 

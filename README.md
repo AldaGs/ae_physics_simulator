@@ -186,9 +186,16 @@ See `SPIKES.md` for the numbers and, more usefully, for what the result does
 **not** prove: C0.2's 148 KB payload question is still open, since this run
 moved 15.9 KB in and 2.2 KB out.
 
-**C0.2's harness is built but not yet run.** It measures both ways the bake
-could reach `b2_apply_bake.jsx` — escaped into the script text, or via a temp
-file the script opens — on the real 145,090-byte `b2_bake.json`, and sweeps for
-the ceiling in each direction. B2 already reads its bake from a file, so the
-question is not whether that road works but whether the other one is worth
-taking. `SPIKES.md` has the design and what the number will and will not cover.
+**C0.2 also PASSES** (2026-09-08). There is no payload ceiling anywhere near the
+bake. Both ways of getting it into AE — escaped into the script text, or via a
+temp file the script opens — carry the real 145,090-byte `b2_bake.json` intact,
+and neither breaks below **32 MB**, 231× the bake. They cost the same, to within
+the resolution of the clock.
+
+What costs is ExtendScript touching characters, not bytes crossing the boundary:
+at 33 MB, 15.6 s of the 16.1 s was the probe's own checksum loop. For the bake,
+`eval` is ~22 ms and the transfer itself is under one clock tick.
+
+One gap this opens: the *pipe* has not been tested above 16 KB in the request
+direction, and `PHYSBRIDGE_LINE_MAX` is 64 KB, so a bake sent inline would be
+dropped today. `SPIKES.md` has the numbers and the road recommendation.
