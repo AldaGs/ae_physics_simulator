@@ -169,16 +169,32 @@ number covering both would describe neither.
 `sweep` doubles until AE refuses and then bisects, because the useful form of
 "where it breaks" is a byte count, not a doubling step.
 
-## Running C0.3 -- NOT YET
+## Running C0.3
 
-**Do not run the sweep as it stands.** It exhausted memory on the test machine
-badly enough to require a restart: every call in `AEGP_KeyframeSuite` is
-`UNDOABLE`, the scratch comp is deleted *inside* the undo group so AE retains
-all of it, and `AEGP_SetKeyframeFlag` turns out to be O(n^2). Eight benchmarks
-back to back with nothing purged between them was too much.
+Nothing of yours is touched: the bridge builds a scratch comp and solid, times
+them, and deletes them.
 
-`SPIKES.md` has what it measured before that, what needs fixing first, and the
-two instrumentation faults that produced confident wrong answers along the way.
+```
+python c03_client.py bench              # one run, 6,486 keys
+python c03_client.py bench --keys 1000  # a smaller one
+python c03_client.py bench --sweep      # several, with pauses between
+```
+
+**An earlier version of this exhausted memory badly enough to force a restart**,
+and the guard rails come from that. Every call in `AEGP_KeyframeSuite` is
+`UNDOABLE`, so 12,000 keys across four phases is ~48,000 operations AE must
+retain — and the scratch comp was deleted *inside* the same undo group, so AE
+had to keep all of it alive to undo the deletion. Eight runs back to back, with
+`AEGP_SetKeyframeFlag` turning out to be O(n²) on top, was too much.
+
+Hence: one run per invocation unless `--sweep`, a 6,486-key cap (B2's real
+count — above that was always extrapolation), `mode=full` capped lower still
+because it is the quadratic path, and the bridge closes the measured undo group
+before it deletes anything.
+
+`--purge` empties AE's undo and image caches afterwards, which is the only thing
+that actually *releases* the retained state. It is off by default because it
+discards your undo history for the whole project.
 
 ## The one change this forced on the ExtendScript
 

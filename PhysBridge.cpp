@@ -1044,26 +1044,74 @@ NowSeconds(void)
 	return (double)t.QuadPart / (double)f.QuadPart;
 }
 
-/*	Tear down whatever got built, in reverse. Written as one function called
-	from every exit because a spike that leaves a scratch comp behind on the
-	failure path teaches the user to distrust it -- and the failure path is the
-	one that runs when something is wrong. */
+/*	Tear down whatever got built, in reverse, and close the undo group.
+
+	One function called from every exit, because a spike that strands a scratch
+	comp on the failure path teaches the user to distrust it -- and the failure
+	path is the one that runs when something is wrong. It owns the undo group
+	for the same reason: four call sites each remembering to end it in the
+	right order is four chances to get it wrong.
+
+	THE ORDER MATTERS, and getting it wrong is what took a machine down.
+
+	Every call in AEGP_KeyframeSuite is marked UNDOABLE. The first version put
+	the keyframe work AND the comp deletion in one group, so AE had to retain
+	every operation plus a comp it might have to resurrect. The measured work
+	now closes first, and the teardown gets its own small group.
+
+	That bounds the SHAPE of what is retained; it does not empty it. Only a
+	purge does, and app.purge(UNDO_CACHES) throws away the user's undo history
+	for their whole project -- so it is opt-in, never the default. Wiping
+	somebody's undo stack to tidy up after a benchmark is not a trade this code
+	gets to make on their behalf. */
 static void
-BenchCleanup(AEGP_SuiteHandler	&suites,
-			 AEGP_StreamRefH	streamH,
-			 AEGP_ItemH			comp_itemH,
-			 AEGP_ItemH			solid_itemH)
+BenchFinish(AEGP_SuiteHandler	&suites,
+			AEGP_StreamRefH		streamH,
+			AEGP_ItemH			comp_itemH,
+			AEGP_ItemH			solid_itemH,
+			A_Boolean			do_purge)
 {
 	A_Err err2 = A_Err_NONE, err = A_Err_NONE;
 
 	if (streamH) {
 		ERR2(suites.StreamSuite2()->AEGP_DisposeStream(streamH));
 	}
-	if (comp_itemH) {
-		ERR2(suites.ItemSuite6()->AEGP_DeleteItem(comp_itemH));
+
+	//	Close the measured group BEFORE anything else touches the project.
+	ERR2(suites.UtilitySuite3()->AEGP_EndUndoGroup());
+
+	if (comp_itemH || solid_itemH) {
+		ERR2(suites.UtilitySuite3()->AEGP_StartUndoGroup(
+				"PhysBridge C0.3 cleanup"));
+
+		if (comp_itemH) {
+			ERR2(suites.ItemSuite6()->AEGP_DeleteItem(comp_itemH));
+		}
+		if (solid_itemH) {
+			ERR2(suites.ItemSuite6()->AEGP_DeleteItem(solid_itemH));
+		}
+		ERR2(suites.UtilitySuite3()->AEGP_EndUndoGroup());
 	}
-	if (solid_itemH) {
-		ERR2(suites.ItemSuite6()->AEGP_DeleteItem(solid_itemH));
+
+	if (do_purge) {
+		AEGP_MemHandle resultH = NULL, errorH = NULL;
+
+		/*	Guarded individually: PurgeTarget is not on every AE version, and
+			an exception here would abandon the rest. No alert() anywhere --
+			this runs inside the idle hook, where a modal waits for a click
+			nobody is there to give. */
+		ERR2(suites.UtilitySuite6()->AEGP_ExecuteScript(S_my_id,
+				"try{app.purge(PurgeTarget.UNDO_CACHES);}catch(e){}"
+				"try{app.purge(PurgeTarget.ALL_CACHES);}catch(e){}",
+				FALSE, &resultH, &errorH));
+
+		if (resultH) {
+			ERR2(suites.MemorySuite1()->AEGP_FreeMemHandle(resultH));
+		}
+		if (errorH) {
+			ERR2(suites.MemorySuite1()->AEGP_FreeMemHandle(errorH));
+		}
+		Log("  bench_keys: purged undo and all caches\n");
 	}
 }
 
@@ -1084,11 +1132,20 @@ DoBenchKeys(AEGP_SuiteHandler &suites, const BridgeRequest *rP)
 
 	long n = (long)strtol(rP->num, NULL, 10);
 
-	if (n < 1 || n > 200000) {
-		PipeWriteError("bench_keys needs \"bytes\" between 1 and 200000 "
-						"(it is a key count here, not a size)");
+	/*	20,000 rather than the 200,000 this started with. The sweep that
+		exhausted a machine's memory ran to 12,000 keys eight times over, and
+		the useful range was never above 6,486 -- B2's real key count. Anything
+		larger was extrapolation bought with retained undo state. */
+	if (n < 1 || n > 20000) {
+		PipeWriteError("bench_keys needs \"bytes\" between 1 and 20000 -- it "
+						"is a key count, and the harness is capped because the "
+						"earlier sweep exhausted memory at this scale");
 		return;
 	}
+
+	//	Opt-in, and it stays that way: purging discards the user's undo
+	//	history for their whole project, not just this benchmark's share.
+	A_Boolean do_purge = rP->purge;
 
 	//	One group for the whole thing, so a failure anywhere is one Undo away.
 	ERR(suites.UtilitySuite3()->AEGP_StartUndoGroup("PhysBridge C0.3 bench"));
@@ -1133,8 +1190,7 @@ DoBenchKeys(AEGP_SuiteHandler &suites, const BridgeRequest *rP)
 			AEGP_LayerStream_POSITION, &streamH));
 
 	if (err) {
-		BenchCleanup(suites, streamH, comp_itemH, solid_itemH);
-		ERR2(suites.UtilitySuite3()->AEGP_EndUndoGroup());
+		BenchFinish(suites, streamH, comp_itemH, solid_itemH, do_purge);
 		PipeWriteError("could not build the scratch comp for the benchmark");
 		return;
 	}
@@ -1176,8 +1232,7 @@ DoBenchKeys(AEGP_SuiteHandler &suites, const BridgeRequest *rP)
 	double add_s = NowSeconds() - t0;
 
 	if (err) {
-		BenchCleanup(suites, streamH, comp_itemH, solid_itemH);
-		ERR2(suites.UtilitySuite3()->AEGP_EndUndoGroup());
+		BenchFinish(suites, streamH, comp_itemH, solid_itemH, do_purge);
 		PipeWriteError("the batch add failed");
 		return;
 	}
@@ -1342,8 +1397,7 @@ DoBenchKeys(AEGP_SuiteHandler &suites, const BridgeRequest *rP)
 
 	A_Err bench_err = err;
 
-	BenchCleanup(suites, streamH, comp_itemH, solid_itemH);
-	ERR2(suites.UtilitySuite3()->AEGP_EndUndoGroup());
+	BenchFinish(suites, streamH, comp_itemH, solid_itemH, do_purge);
 
 	if (bench_err) {
 		char m[128];
@@ -1417,6 +1471,9 @@ HandleLine(const char *lineZ)
 
 	if (JsonStr(lineZ, "\"echo\":", echoZ, sizeof(echoZ))) {
 		r.echo = (echoZ[0] == '1' || echoZ[0] == 't') ? TRUE : FALSE;
+	}
+	if (JsonStr(lineZ, "\"purge\":", echoZ, sizeof(echoZ))) {
+		r.purge = (echoZ[0] == '1' || echoZ[0] == 't') ? TRUE : FALSE;
 	}
 	Log("  rx: cmd=%s arg=%s bytes=%s mode=%s echo=%d data=%llu\n", r.cmd,
 		r.arg, r.num, r.mode, (int)r.echo, (unsigned long long)r.data_len);

@@ -92,6 +92,9 @@ typedef struct {
 	char		num[24];		// size_probe: how many bytes to synthesise
 	char		mode[16];		// C0.2 ingestion path: "literal" or "file"
 	A_Boolean	echo;			// C0.2: return the payload, not a report
+	A_Boolean	purge;			// C0.3: drop AE's undo and image caches
+								// afterwards -- opt-in, it discards the
+								// user's undo history for the whole project
 
 	/*	pipe_probe's inline payload, and the one field that is not a copy.
 		It is allocated on the pipe thread and freed on the UI thread, so

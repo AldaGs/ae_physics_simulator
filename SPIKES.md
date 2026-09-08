@@ -338,13 +338,13 @@ Run inside After Effects on 2026-09-08. `read_scene` was untouched, so C0.1
 stays runnable, and the corrected init label is now live in the log
 (`AEGP driver 126.3`).
 
-## C0.3 — keyframes from native code — **measured, not yet recorded**
+## C0.3 — keyframes from native code — **harness fixed, ready to re-run**
 
-> ⚠️ **Do not run `c03_client.py bench` as it stands.** The full sweep exhausted
-> memory on the test machine badly enough to require a restart. The harness
-> needs the fixes in "What went wrong" below before it is run again. The
-> measurements it produced are believed sound and are summarised there; they are
-> deliberately not written up as a result yet.
+> The first version of this harness exhausted memory on the test machine badly
+> enough to require a restart. **The fixes are in** — see "What went wrong"
+> below — but the measurements it produced are still recorded as observations
+> rather than written up as a result, because they were taken with the harness
+> that crashed.
 
 Can `AEGP_KeyframeSuite` beat ExtendScript's measured 853 µs/key interpolation
 cost? Wall I's only remaining lever, and fracture makes it a requirement rather
@@ -426,10 +426,26 @@ other than signatures:
   the machine already struggling.
 - **Nothing was purged between runs**, so eight of these accumulated.
 
-Before it runs again: end the undo group *before* deleting the comp, cap at
-6,486 (B2's real key count — 12,000 was always extrapolation), skip `mode=full`
-at large counts since its answer is already known, and run one size per
-invocation.
+**All four fixes are now in:**
+
+| | |
+|---|---|
+| the measured undo group closes *before* anything is deleted | teardown gets its own small group, so the two are never one retained entry |
+| capped at 6,486 keys | B2's real count; 20,000 hard limit in the bridge |
+| `mode=full` capped lower still, at 3,000 | it is the quadratic path and its answer is already known |
+| one run per invocation | `--sweep` must be asked for, and pauses between runs |
+
+Plus `--purge`, which runs `app.purge(PurgeTarget.UNDO_CACHES)` through the
+bridge's own `AEGP_ExecuteScript`. That is the only thing that actually
+*releases* the retained state rather than bounding it — there is no purge in the
+AEGP suites, only `AEGP_Menu_PURGE` for inserting a menu item. It is **opt-in
+and stays that way**: it discards the user's undo history for their whole
+project, and wiping somebody's undo stack to tidy up after a benchmark is not a
+trade this code gets to make on their behalf.
+
+Ending the group earlier bounds the *shape* of what AE retains; it does not
+empty it. Only the purge does. Both are worth having and neither is a
+substitute for the other.
 
 ### What was measured, pending write-up
 
