@@ -338,13 +338,12 @@ Run inside After Effects on 2026-09-08. `read_scene` was untouched, so C0.1
 stays runnable, and the corrected init label is now live in the log
 (`AEGP driver 126.3`).
 
-## C0.3 — keyframes from native code — **harness fixed, ready to re-run**
+## C0.3 — keyframes from native code — **PASS** (2026-09-08, AE 26.3x87)
 
 > The first version of this harness exhausted memory on the test machine badly
-> enough to require a restart. **The fixes are in** — see "What went wrong"
-> below — but the measurements it produced are still recorded as observations
-> rather than written up as a result, because they were taken with the harness
-> that crashed.
+> enough to require a restart. The fixes are in and the result below was
+> re-measured on the fixed harness — see "What went wrong" for what caused it
+> and what the guard rails now are.
 
 Can `AEGP_KeyframeSuite` beat ExtendScript's measured 853 µs/key interpolation
 cost? Wall I's only remaining lever, and fracture makes it a requirement rather
@@ -447,19 +446,99 @@ Ending the group earlier bounds the *shape* of what AE retains; it does not
 empty it. Only the purge does. Both are worth having and neither is a
 substitute for the other.
 
-### What was measured, pending write-up
+### The result (2026-09-08, AE 26.3x87, on the fixed harness)
 
-Believed sound, but recorded here as observations rather than as a result:
+**Wall I is solved, and it was the ExtendScript bridge all along.** The LINEAR
+pass costs **88.5 µs/key** natively against ExtendScript's 853 — about **10×** —
+and it is flat:
 
-- **`AEGP_SetKeyframeFlag(SPATIAL_AUTOBEZIER)` is superlinear** — 151 µs/key at
-  1,000 keys rising to 3,197 at 12,000, i.e. O(n²) overall. Called per key as
-  B2 does it, native is *worse* than ExtendScript at scale.
-- **It is also unnecessary.** `AEGP_SetKeyframeSpatialTangents` appears to clear
-  the flag itself, and dropping the call leaves the pass flat at ~70–85 µs/key
-  across a 12× range — about **10×** faster than ExtendScript's 853.
-- **Verified clean at 3,000 keys, `nobezier`:** 66 sampled keys, 0 not LINEAR,
-  0 still auto-bezier, worst tangent magnitude 0.0. That is the load-bearing
-  claim confirmed, but at 3,000 keys and **not** at 12,000.
+```
+mode=nobezier
+   1,000 keys   add 30.1   interp 26.8   tangents 59.0   =  85.8 us/key   straight (67 keys)
+   6,486 keys   add 29.2   interp 27.1   tangents 61.4   =  88.5 us/key   straight (65 keys)
+```
+
+6,486 is B2's own key count, so that row is a direct comparison and not an
+extrapolation.
+
+**But the auto-bezier call is O(n²), and it is the whole cost.** Doing all three
+calls as B2 does:
+
+```
+mode=full
+   1,000 keys   bezier 142.9   =  228.2 us/key
+   3,000 keys   bezier 359.5   =  446.8 us/key
+```
+
+The bezier phase's *per-key* price grows with the key count — 2.5× the cost for
+3× the keys — so the total is quadratic. The crashed harness saw the same shape
+further out: 151 µs/key at 1,000 rising to 3,197 at 12,000, by which point
+native is **worse** than ExtendScript. Something inside `AEGP_SetKeyframeFlag`
+walks the keyframe list on every call.
+
+**Dropping it leaves the path straight anyway**, which is what makes the flat
+number the real one. Every run above reports `straight`: interpolation LINEAR,
+`SPATIAL_AUTOBEZIER` clear, and spatial tangents actually zero, on 65–67 sampled
+keys spread across the range with the last always forced onto the final key.
+
+### What this costs in the cases that decide anything
+
+| | ExtendScript | native |
+|---|---|---|
+| the LINEAR pass, per key | 853 µs | 88.5 µs |
+| 12,000 keys (projected) | 10 s | 1.1 s |
+| fifty shards × 300 frames (projected) | 13 s | 1.3 s |
+
+**Fracture is affordable.** It was the case that turned Wall I from an
+optimisation into a requirement, and 1.3 s is not a wall.
+
+### The part that did not go the way it was supposed to
+
+**Native's batch add is *slower* than ExtendScript's.** `setValuesAtTimes` was
+measured at 19.6 µs/key; the native `StartAddKeyframes` / `AddKeyframes` /
+`SetAddKeyframe` / `EndAddKeyframes` sequence costs ~29–31. So the entire win is
+in the interpolation pass, and going native buys nothing on the value writes —
+which B2 had already established were free.
+
+That is worth stating plainly because it inverts the intuition the spike started
+with. The whole apply is 117.7 µs/key native against 872.6 for ExtendScript
+(19.6 + 853), about 7.4× — a smaller and more honest number than the 10× on the
+pass alone.
+
+### Why the comparison is, if anything, generous to ExtendScript
+
+B2's 853 µs/key is a **blend**. Its `makeLinear()` makes three calls per Position
+key but only one per Rotation key, since rotation is not spatial and has no
+tangents, and the 6,486 keys were Position *and* Rotation across three layers.
+The cheap rotation keys pull that average down.
+
+The native figure here is Position-only — the expensive stream, with tangents.
+So the true ExtendScript cost for Position alone is *higher* than 853, and
+native's advantage on like-for-like work is at least 10×, not at most.
+
+### One thing measured and one thing assumed
+
+Measured: dropping the auto-bezier call leaves the path straight. Assumed: *why*.
+
+The obvious explanation is that `AEGP_SetKeyframeSpatialTangents` clears the flag
+as a side effect. But there is a second one that fits the same evidence —
+keyframes created through `AEGP_AddKeyframes` may simply never get spatial
+auto-bezier in the first place, unlike the ones ExtendScript's `setValuesAtTimes`
+creates. The read-back happens after the tangent phase, so it cannot tell those
+apart.
+
+It does not change the recommendation, because the product creates its keys
+natively either way. It does mean the mechanism is unverified, and the cheap way
+to settle it is to read the flag *before* the tangent phase rather than after.
+
+### Scope
+
+Measured on a scratch comp with one solid layer's Position stream,
+dimensionality 3, at 1,000 / 3,000 / 6,486 keys. The 12,000-key and fracture
+figures above are **projected**, not measured: the harness is capped at 6,486
+after the earlier sweep exhausted memory, and the client labels them as
+projections rather than quoting them as results. Verification is by sampling
+65–67 keys per run, not every key.
 
 ### Two instrumentation faults worth remembering
 

@@ -240,7 +240,19 @@ What costs is ExtendScript touching characters, not bytes crossing the boundary:
 at 33 MB, 15.6 s of the 16.1 s was the probe's own checksum loop. For the bake,
 `eval` is ~22 ms and the transfer itself is under one clock tick.
 
-The pipe was the other half, and it is measured too: no ceiling below **32 MB**
+**C0.3 also PASSES** (2026-09-08). Wall I was the ExtendScript bridge: the LINEAR
+pass costs **88.5 µs/key** natively against ExtendScript's 853, about **10×**,
+flat from 1,000 to 6,486 keys — and 6,486 is B2's own key count, so that is a
+comparison rather than an extrapolation. Fifty shards × 300 frames projects to
+1.3 s against 13 s, which makes fracture affordable.
+
+Two things worth knowing before believing the headline. `AEGP_SetKeyframeFlag`
+is **O(n²)** — called per key as B2 does it, native is *worse* than ExtendScript
+at scale — but dropping it leaves the path straight anyway. And native's batch
+add is *slower* than `setValuesAtTimes` (29 µs/key against 19.6), so the whole
+win is in the interpolation pass: 7.4× across a complete apply, not 10×.
+
+The pipe was the other half of C0.2, and it is measured too: no ceiling below **32 MB**
 in the request direction either, at about 79 MB/s, with the real bake arriving
 inline in ~15 ms. The old 64 KB `PHYSBRIDGE_LINE_MAX` was an arbitrary constant
 from when every request was a path and a number; the accumulator now grows on
