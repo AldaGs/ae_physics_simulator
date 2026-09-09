@@ -219,6 +219,66 @@ nothing to explain it. The bridge now clears its globals (`PHYS_RETURN_JSON`,
 `ExecuteScript` — separate because an appended line does not run when the script
 throws, which is when a stale flag does the most damage.
 
+## The application — `app/`
+
+**C1.1.** The Tauri shell the plan has been describing since Phase C was
+decided: a window that lives *outside* After Effects, talks to this plug-in over
+the C0.1 pipe, and owns its own settings.
+
+It lives in this repo because one clone then gets both halves of the product.
+The cost is a node/cargo project inside the SDK `Examples` tree, which is a wart
+and not a problem — nothing in the MSBuild solution knows `app/` exists.
+
+```powershell
+cd app
+npm install
+npm run tauri dev      # or: npm run tauri build
+```
+
+What it does, and the whole of what it does:
+
+| | |
+|---|---|
+| **bridge light** | pings the AEGP, so "is this thing connected" is answered before anything else fails |
+| **read comp** | `read_scene` over the pipe, running `b1_read_shapes.jsx` inside AE. The document is written to the app's work folder, because B3 takes a **file** and hashes it — that is Wall K's mechanism, and C3 depends on it surviving the GUI |
+| **scene list** | comp facts, layers, and the reader's own warnings. Clicking a layer pins it: B3's `--static`, which is the one parameter that is per-layer |
+| **parameters** | B3's set, as controls, at B3's defaults. Nothing here is a second implementation of the loop — every control is an argument to `b3_loop.py` |
+| **simulate** | runs that command and reports what it said, including the escape refusal (exit 3) as its own outcome rather than as a failure |
+| **settings** | interpreter and prototype folder, saved on every change |
+
+### What it deliberately is not
+
+**It does not know the schema.** The scene document is parsed in the front end,
+shallowly — comp facts, names, ids, warnings. `ae-physics-scene/2` already has
+two implementations that have to agree, `scene_io.py` and the jsx, and the plan
+already worries about those drifting; a third in Rust, reading the same fields
+to build a list, is a third place to get it wrong for nothing.
+
+**It does not apply the bake.** That is still `b2_apply_bake.jsx` by hand. And
+it does not show you the bake before you apply it — that is C2, and A5 is the
+argument for why looking matters.
+
+### The re-arm race, which is worth knowing about
+
+The pipe server holds **one instance** of each pipe and re-creates them between
+clients. A `CreateFile` landing inside that window connects to an instance the
+server is about to tear down: the request is read and answered, and the answer
+is written to nobody —
+
+```
+pipe: client connected
+rx: cmd=ping ...
+pipe: client gone
+write: no client connected, 23 bytes dropped
+```
+
+23 bytes is exactly `{"ok":true,"pong":true}`. `c01_client.py` never hit this
+because a person runs it once; an application pings on launch and then reads,
+back to back. `app/src-tauri/src/bridge.rs` retries the whole exchange when the
+connection closes without an answer, and *only* then — a connection that drops
+mid-reply is an answer, and re-running it would re-run whatever the bridge
+already did.
+
 ## Status
 
 **C0.1 PASSES** (2026-09-07, AE 26.3x87). The bridge returned a scene document

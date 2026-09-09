@@ -1,0 +1,356 @@
+/* The shell's look.
+ *
+ * It sits beside After Effects, so it takes AE's key: a dark, low-chroma
+ * surface with one accent, and no decoration competing with the comp on the
+ * other monitor. Light mode is honoured because a desktop app that ignores the
+ * system theme is a window that glows in a lit room.
+ */
+
+:root {
+  --bg: #f4f4f5;
+  --panel: #ffffff;
+  --line: #dcdce0;
+  --ink: #1b1b1f;
+  --dim: #6b6b76;
+  --accent: #2f6fed;
+  --good: #1a7f45;
+  --warn: #a15c00;
+  --bad: #b4231c;
+  --good-bg: #eaf6ee;
+  --warn-bg: #fdf3e2;
+  --bad-bg: #fdeceb;
+  --radius: 6px;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1c1c1f;
+    --panel: #252529;
+    --line: #37373d;
+    --ink: #ececf0;
+    --dim: #9a9aa5;
+    --accent: #6a9bff;
+    --good: #63d68f;
+    --warn: #e8b25c;
+    --bad: #ff7b72;
+    --good-bg: #1c2f23;
+    --warn-bg: #302716;
+    --bad-bg: #331d1c;
+    color-scheme: dark;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 13px/1.5 "Segoe UI", system-ui, sans-serif;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+h1 {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  margin: 0;
+}
+
+h2 {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--dim);
+  margin: 0;
+  display: inline;
+}
+
+h3 {
+  font-size: 12px;
+  margin: 0 0 6px;
+}
+
+main {
+  display: grid;
+  grid-template-columns: minmax(300px, 1fr) minmax(340px, 1fr);
+  gap: 14px;
+  padding: 14px 18px 28px;
+  align-items: start;
+}
+
+#settings-panel {
+  grid-column: 1 / -1;
+}
+
+section {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px 14px;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+/* ---- the bridge light ---------------------------------------------------- */
+
+.bridge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--dim);
+  font-size: 12px;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dim);
+  flex: none;
+}
+.dot[data-state="up"] {
+  background: var(--good);
+}
+.dot[data-state="down"] {
+  background: var(--bad);
+}
+.dot[data-state="busy"] {
+  background: var(--warn);
+}
+
+/* ---- controls ------------------------------------------------------------ */
+
+button {
+  font: inherit;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  padding: 5px 12px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+button.primary:hover:not(:disabled) {
+  filter: brightness(1.1);
+  color: #fff;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+label {
+  display: block;
+  font-size: 12px;
+  color: var(--dim);
+}
+
+label small {
+  display: block;
+  font-size: 11px;
+  opacity: 0.85;
+  font-weight: 400;
+}
+
+input[type="number"],
+input[type="text"] {
+  width: 100%;
+  margin-top: 4px;
+  font: inherit;
+  padding: 5px 7px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--bg);
+  color: var(--ink);
+}
+
+input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+label.check {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-top: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+label.check input {
+  margin-top: 2px;
+  flex: none;
+}
+label.check span {
+  color: var(--ink);
+}
+
+label.wide {
+  margin-bottom: 10px;
+}
+
+/* ---- the scene ----------------------------------------------------------- */
+
+dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+  margin: 0 0 10px;
+  font-size: 12px;
+}
+dt {
+  color: var(--dim);
+}
+dd {
+  margin: 0;
+}
+
+ul#layers {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+li.layer {
+  display: grid;
+  grid-template-columns: 48px 1fr auto;
+  gap: 8px;
+  align-items: baseline;
+  padding: 6px 10px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--line);
+}
+li.layer:last-child {
+  border-bottom: none;
+}
+li.layer:hover {
+  background: var(--bg);
+}
+li.layer .pin {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+}
+li.layer .meta {
+  color: var(--dim);
+  font-size: 11px;
+}
+li.layer.pinned .name {
+  color: var(--accent);
+}
+
+#warnings h3 {
+  margin-top: 12px;
+  color: var(--warn);
+}
+#warnings ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--dim);
+  font-size: 12px;
+}
+#warnings li {
+  margin-bottom: 4px;
+}
+
+/* ---- results ------------------------------------------------------------- */
+
+.empty,
+.hint {
+  color: var(--dim);
+  font-size: 12px;
+  margin: 8px 0 0;
+}
+
+#result {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+}
+#result.good {
+  background: var(--good-bg);
+  border-color: var(--good);
+}
+#result.warn {
+  background: var(--warn-bg);
+  border-color: var(--warn);
+}
+#result.bad {
+  background: var(--bad-bg);
+  border-color: var(--bad);
+}
+
+pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 11px/1.45 "Cascadia Mono", Consolas, monospace;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.good-text {
+  color: var(--good);
+}
+.bad-text {
+  color: var(--bad);
+}
+
+/* ---- settings ------------------------------------------------------------ */
+
+summary {
+  cursor: pointer;
+  margin-bottom: 10px;
+}
+summary::marker {
+  color: var(--dim);
+}
+
+#probe-result {
+  font-size: 12px;
+  color: var(--dim);
+  flex: 1;
+}

@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AE Physics</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+
+  <body>
+    <header>
+      <h1>AE Physics</h1>
+      <div class="bridge">
+        <span id="bridge-dot" class="dot" data-state="unknown"></span>
+        <span id="bridge-text">bridge not checked</span>
+        <button id="ping" class="ghost">Check</button>
+      </div>
+    </header>
+
+    <main>
+      <!-- The scene: read from AE, never edited here. C3 makes re-reading the
+           staleness guard; C1.1 only has to make the read a button. -->
+      <section id="scene-panel">
+        <div class="panel-head">
+          <h2>Scene</h2>
+          <button id="read" class="primary">Read comp from AE</button>
+        </div>
+
+        <p id="scene-empty" class="empty">
+          Nothing read yet. Open the comp in After Effects, then read it.
+        </p>
+
+        <div id="scene-body" hidden>
+          <dl id="comp-facts"></dl>
+          <p class="hint">
+            Click a layer to pin it. A pinned layer is a ramp, a peg or a floor:
+            it never moves and gets <em>no keyframes at all</em>, so your own
+            placement of it survives.
+          </p>
+          <ul id="layers"></ul>
+          <div id="warnings"></div>
+        </div>
+      </section>
+
+      <!-- B3's parameter set, as controls. Every one of these is an argument
+           to b3_loop.py and nothing else. -->
+      <section id="params-panel">
+        <div class="panel-head">
+          <h2>Simulation</h2>
+          <button id="simulate" class="primary" disabled>Simulate</button>
+        </div>
+
+        <div class="grid">
+          <label>
+            Gravity <small>m/s², positive is down</small>
+            <input id="gravity" type="number" step="0.1" />
+          </label>
+          <label>
+            Pixels per metre <small>A1 measured 10–1000 usable</small>
+            <input id="ppm" type="number" step="10" min="1" />
+          </label>
+          <label>
+            Substeps <small>frames land on substep boundaries</small>
+            <input id="substeps" type="number" step="1" min="1" />
+          </label>
+          <label>
+            Frames <small>blank means the comp’s own duration</small>
+            <input id="frames" type="number" step="1" min="1" placeholder="comp" />
+          </label>
+          <label>
+            Friction
+            <input id="friction" type="number" step="0.05" min="0" />
+          </label>
+          <label>
+            Bounciness <small>elasticity</small>
+            <input id="elasticity" type="number" step="0.05" min="0" />
+          </label>
+        </div>
+
+        <label class="check">
+          <input id="no-walls" type="checkbox" />
+          <span>
+            Do not enclose the comp
+            <small>things will leave, and keep going</small>
+          </span>
+        </label>
+        <label class="check">
+          <input id="allow-escapes" type="checkbox" />
+          <span>
+            Write the bake even if a layer escapes
+            <small>
+              B2 found this by accident: a rolling shape left the comp and
+              integrated to 839,091 px, written into the project as real
+              keyframes. The refusal is a default, not a policy — it is your comp
+            </small>
+          </span>
+        </label>
+
+        <div id="result" hidden></div>
+      </section>
+
+      <!-- Machine-shaped, set once. Folded away because it is not the work. -->
+      <section id="settings-panel">
+        <details>
+          <summary><h2>Settings</h2></summary>
+          <label class="wide">
+            Python interpreter
+            <small>a bare name is found on PATH; an absolute path pins a venv</small>
+            <input id="python" type="text" spellcheck="false" />
+          </label>
+          <label class="wide">
+            Prototype folder
+            <small>the python-proto/physics_sim checkout</small>
+            <input id="proto-dir" type="text" spellcheck="false" />
+          </label>
+          <div class="panel-head">
+            <button id="probe" class="ghost">Check these</button>
+            <span id="probe-result"></span>
+          </div>
+          <p class="hint" id="settings-where"></p>
+        </details>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
