@@ -166,6 +166,13 @@ b2_bake.json -- 145,090 bytes, both ingestion paths
   file      145,090 B  script    1,030 B   93 ms  sum  65 ms  eval  24 ms  4 keys  intact
 ```
 
+> **The fixture has since grown.** C1.0 took the bake to `ae-physics-bake/3`,
+> and `b2_bake.json` is now **145,403 bytes** — 313 more, for the empty Tier 0
+> slots. Every number in this section is left as it was measured, on the
+> 145,090-byte file; re-running C0.2 today moves the payload by 0.2% against a
+> ceiling 231× away, so the finding is untouched and the reading is not
+> re-baselined to pretend otherwise.
+
 Five repeats: literal 93–109 ms, file 94–109 ms. The two roads are **the same
 speed**, and the difference between them is smaller than the instrument can
 see — the bridge times with `GetTickCount`, whose resolution is ~15.6 ms, which
