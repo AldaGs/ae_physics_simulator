@@ -27,13 +27,71 @@ one bridge instead of building a CEP panel and throwing it away.
 
 ## What is here now
 
-**PhysBridge** — the C0.1 spike, and the seed of the AEGP. It listens on a local
-named pipe, runs the project's existing ExtendScript through
-`AEGP_ExecuteScript`, and returns the result down the pipe.
+**PhysBridge** — the AEGP. It started as the C0.1 spike and is now the product's
+AE half. It listens on a local named pipe and answers:
+
+| command | what it does |
+|---|---|
+| `ping` | the bridge is up and the plug-in is loaded |
+| `read_scene` | runs `b1_read_shapes.jsx` through `AEGP_ExecuteScript` and returns the scene document verbatim |
+| `apply_bake` | writes the keyframes **natively**, 131.0 µs/key against ExtendScript's 872.6 |
+| `focus_ae` | brings After Effects to the front after an apply |
+| `register_app` | remembers where the application is, so the menu item can open it |
+| `size_probe`, `pipe_probe`, `send_payload`, `bench_keys` | the C0.2 and C0.3 harnesses, kept because every native figure is a comparison against them |
+
+And two menu items:
+
+- **Composition → Physics Simulator** opens the application.
+- **Window → PhysBridge: bridge status** reports what the pipe has served.
 
 The plug-in keeps the name `PhysBridge` even though the repo is named for the
 whole simulator: it is what the built `.aex` is called and what the project
 paths reference, and renaming means rebuilding and re-verifying for nothing.
+
+### `b2_apply_bake.jsx` is not deprecated
+
+`apply_bake` does the same job about 7.4× faster, and the ExtendScript stays
+anyway. It is the REFERENCE IMPLEMENTATION: every native number is a comparison
+against it, and a second implementation you can no longer run is a second
+implementation you can no longer check.
+
+### The menu item never guesses where the app is
+
+The AEGP is in Program Files; the app is wherever it was built or unzipped.
+There is no relationship between those paths, so anything derived from one to
+reach the other is a guess — and a wrong guess makes a menu item that silently
+does nothing, which is worse than no menu item.
+
+So the app sends `register_app` with its own executable path on every launch,
+and the plug-in keeps it in AE's preferences (not a file beside the `.aex`:
+Program Files is not writable by a normal user, and a plug-in that needs
+elevation to remember something is a plug-in nobody configures). The consequence
+is easy to state — **the menu item works once the app has been opened by hand,
+and says exactly that until then.**
+
+A second click does not start a second copy. Two processes on one work directory
+both write one `bake.json`, so a live bridge client means "already open".
+
+### What the apply deliberately does not do
+
+C0.3 measured that clearing `SPATIAL_AUTOBEZIER` per key costs more than every
+other phase together AND grows per key with the key count — 167 µs/key at 1,000
+and 2,765 at 12,000, O(n²) overall. Skipping it leaves the motion path straight,
+so it is skipped.
+
+But C0.3 measured **that** and assumed **why**, and the product now depends on
+it. So the apply reads the flag back on a spread of keys and reports the count.
+If AE ever stops behaving the way C0.3 measured, the window says so instead of
+quietly bowing every motion path between keyframes — which is A5's invisible
+failure, the one no still frame shows.
+
+Verified on a real comp 2026-09-10: clear on every sampled key.
+
+## How it got here — the C0 spikes
+
+Kept because every native figure above is a comparison against these, and a
+measurement whose baseline you can no longer run is a measurement you can no
+longer defend.
 
 ### The question C0.1 asks
 
@@ -122,6 +180,9 @@ Newline-delimited JSON, one request and one reply.
 |---|---|
 | `{"cmd":"ping"}` | `{"ok":true,"pong":true}` |
 | `{"cmd":"read_scene","script":"<abs path to .jsx>"}` | the scene JSON, or `{"ok":false,"error":"..."}` |
+| `{"cmd":"apply_bake","script":"<abs path to bake.json>"}` | key counts and phase timings, or a refusal naming the mismatch |
+| `{"cmd":"focus_ae"}` | `{"ok":true,"foreground":true｜false}` — advisory, and it says which |
+| `{"cmd":"register_app","script":"<abs path to the exe>"}` | `{"ok":true,"registered":true}` |
 | `{"cmd":"size_probe","bytes":"N","mode":"literal"｜"file"}` | a C0.2 report — what was sent, what the script saw |
 | `{"cmd":"size_probe","bytes":"N","echo":"1"}` | the N bytes themselves, for the return direction |
 | `{"cmd":"send_payload","script":"<abs path>","mode":"literal"｜"file"}` | the same report, for a real file |
@@ -221,9 +282,30 @@ throws, which is when a stale flag does the most damage.
 
 ## The application — `app/`
 
-**C1.1.** The Tauri shell the plan has been describing since Phase C was
-decided: a window that lives *outside* After Effects, talks to this plug-in over
-the C0.1 pipe, and owns its own settings.
+The Tauri shell the plan has been describing since Phase C was decided: a window
+that lives *outside* After Effects, talks to this plug-in over the C0.1 pipe, and
+owns its own settings.
+
+**Scene | Viewport | Simulation.** Read the comp, pin layers, set physics per
+layer, simulate, **scrub the result**, apply. The viewport takes the middle
+because it is the only panel whose usefulness scales with width.
+
+Two things about it are worth knowing before reading the code:
+
+- **The scrubber is continuous** — twentieths of a frame, quarter-frame steps.
+  A5's finding is that a wrapped rotation is invisible on every still and the
+  damage lives inside one frame interval; a per-frame scrubber can only show the
+  values we already know are correct. In the C1.2 sitting a layer crossed 180°
+  between frames 69 and 70 and the sampler stepped straight over it.
+- **The front end owns the transform and nothing else.** Geometry arrives
+  already flattened as `ae-physics-render/1`, because turning a comp into
+  polygons is bezier flattening, group transforms, layer scale and convex
+  decomposition — verified Python that must not be reimplemented in TypeScript.
+  `c2_render_model.py` checks the app's arithmetic against `preview.py` at
+  fractional frames.
+
+Rust parses neither the scene nor the bake. Those already have two
+implementations that must agree, and a third would be a third place to drift.
 
 It lives in this repo because one clone then gets both halves of the product.
 The cost is a node/cargo project inside the SDK `Examples` tree, which is a wart
@@ -281,40 +363,36 @@ already did.
 
 ## Status
 
-**C0.1 PASSES** (2026-09-07, AE 26.3x87). The bridge returned a scene document
-byte-identical to the save dialog's — 2,185 bytes, same sha256, 16 ms for the
-whole round trip inside AE. Phase C's architecture stands, and B1/B2's
-ExtendScript is reused rather than rebuilt.
+**Everything through C2 is done and verified in real After Effects (26.3x87).**
 
-See `SPIKES.md` for the numbers and, more usefully, for what the result does
-**not** prove: C0.2's 148 KB payload question is still open, since this run
-moved 15.9 KB in and 2.2 KB out.
+| | |
+|---|---|
+| C0.1 the bridge | byte-identical scene document, 16 ms round trip |
+| C0.2 payload size | no ceiling below 32 MB, 231× the bake |
+| C0.3 native keyframes | 88.5 µs/key for the interpolation pass vs 853 |
+| C1 the loop | AE holds the solver to **0.000057 px/deg**, straight tweens |
+| the apply | **131.0 µs/key, 28.6×** the ExtendScript path |
+| C2 the viewport | 15/15 offline, agreeing with `preview.py` at fractional frames |
+| C3 Wall K | refuses a stale bake live, and the override applies |
 
-**C0.2 also PASSES** (2026-09-08). There is no payload ceiling anywhere near the
-bake. Both ways of getting it into AE — escaped into the script text, or via a
-temp file the script opens — carry the real 145,090-byte `b2_bake.json` intact,
-and neither breaks below **32 MB**, 231× the bake. They cost the same, to within
-the resolution of the clock.
+`SPIKES.md` has the numbers and, more usefully, what each result does **not**
+cover. Two of those limits are worth repeating here:
 
-What costs is ExtendScript touching characters, not bytes crossing the boundary:
-at 33 MB, 15.6 s of the 16.1 s was the probe's own checksum loop. For the bake,
-`eval` is ~22 ms and the transfer itself is under one clock tick.
+- **A per-key figure is only meaningful from a Release build.** The first
+  measurement of the native apply read 262.4 µs/key against a projection of
+  117.7 — 2.2× the wrong way, on work that should have been cheaper. The `.aex`
+  had been built `Configuration=Debug`, which is `/Od`. What caught it was the
+  direction: a number merely worse than hoped invites a story, a number worse in
+  an impossible direction means the setup is wrong.
+- **Nothing offline can check that the canvas draws what the numbers say.** A
+  correct polygon list and a wrong fill rule look identical to `c2_render_model.py`.
 
-**C0.3 also PASSES** (2026-09-08). Wall I was the ExtendScript bridge: the LINEAR
-pass costs **88.5 µs/key** natively against ExtendScript's 853, about **10×**,
-flat from 1,000 to 6,486 keys — and 6,486 is B2's own key count, so that is a
-comparison rather than an extrapolation. Fifty shards × 300 frames projects to
-1.3 s against 13 s, which makes fracture affordable.
+### What is open
 
-Two things worth knowing before believing the headline. `AEGP_SetKeyframeFlag`
-is **O(n²)** — called per key as B2 does it, native is *worse* than ExtendScript
-at scale — but dropping it leaves the path straight anyway. And native's batch
-add is *slower* than `setValuesAtTimes` (29 µs/key against 19.6), so the whole
-win is in the interpolation pass: 7.4× across a complete apply, not 10×.
-
-The pipe was the other half of C0.2, and it is measured too: no ceiling below **32 MB**
-in the request direction either, at about 79 MB/s, with the real bake arriving
-inline in ~15 ms. The old 64 KB `PHYSBRIDGE_LINE_MAX` was an arbitrary constant
-from when every request was a path and a number; the accumulator now grows on
-demand, and an over-cap line is refused *with a message* instead of dropped in
-silence. `SPIKES.md` has the numbers and the road recommendation.
+- **C6.3** — drawing the scene *before* it is simulated. The viewport draws from
+  `render.json`, which only `b3_loop` produces, so there is nothing to see until
+  a bake exists. Worth doing beyond the convenience: it would give the READER a
+  visual check, which it has never had.
+- **C7** — saving a sim with the project. Waiting on a decision rather than on
+  work: is a sim part of the artwork or part of the working state? See the
+  roadmap.
