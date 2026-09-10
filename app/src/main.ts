@@ -845,6 +845,11 @@ async function boot() {
   });
 
   wireViewport();
+  // Tell the plug-in where this executable is, so the Composition menu item
+  // can open it. Best effort and deliberately unreported: AE may not even be
+  // running, and that is the normal case rather than a fault.
+  invoke("register_app").catch(() => {});
+
   // A bake from a previous session is still worth looking at.
   void loadViewport();
 

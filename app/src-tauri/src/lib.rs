@@ -223,6 +223,35 @@ async fn apply_bake(
     })
 }
 
+/// Tell the plug-in where this executable is.
+///
+/// The AEGP is in Program Files and this app is wherever it was built or
+/// unzipped; there is no relationship between the two, so any path the plug-in
+/// derived would be a guess -- and a wrong guess produces a Composition menu
+/// item that silently does nothing. So the app registers itself on every
+/// launch, and the menu item works from the first time it is opened by hand.
+///
+/// Best effort. A bridge that is not up is the normal case on launch (AE may
+/// not be running at all), and failing to register is not worth a word to the
+/// user.
+#[tauri::command]
+async fn register_app() -> Result<String, String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("cannot find my own path: {e}"))?;
+    let payload = serde_json::json!({
+        "cmd": "register_app",
+        "script": exe.display().to_string(),
+    })
+    .to_string();
+
+    let reply = tauri::async_runtime::spawn_blocking(move || {
+        bridge::request(&payload, PING_TIMEOUT)
+    })
+    .await
+    .map_err(|e| format!("the register task did not finish: {e}"))??;
+    Ok(reply)
+}
+
 /// Bring After Effects to the front.
 ///
 /// Asked of the plug-in rather than done here: it is already inside AE and has
@@ -432,7 +461,8 @@ pub fn run() {
             verify_bake,
             apply_bake,
             load_viewport,
-            focus_ae
+            focus_ae,
+            register_app
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

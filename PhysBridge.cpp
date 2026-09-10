@@ -21,6 +21,8 @@
 static SPBasicSuite			*sP					= NULL;
 static AEGP_PluginID		S_my_id				= 0L;
 static AEGP_Command			S_status_cmd		= 0L;
+static AEGP_Command			S_launch_cmd		= 0L;
+static char					S_app_path[1024]	= { 0 };
 
 static HANDLE				S_pipe_tx			= INVALID_HANDLE_VALUE;
 static HANDLE				S_pipe_rx			= INVALID_HANDLE_VALUE;
@@ -2433,6 +2435,117 @@ DoFocusAE(AEGP_SuiteHandler &suites)
 	PipeWriteLine(msg);
 }
 
+/*	Where the application lives, and why the plug-in does not go looking.
+
+	The AEGP is in Program Files; the app is wherever it was built or unzipped.
+	There is no relationship between those two paths, so any attempt to derive
+	one from the other is a guess -- and a guess that is wrong produces a menu
+	item that does nothing, which is worse than no menu item.
+
+	So the APP TELLS US. It sends `register_app` with its own executable path on
+	every launch, and that is written to AE's preferences under this plug-in's
+	key. The consequence is honest and easy to explain: the menu item works after
+	the app has been opened once by hand, and says so until then.
+
+	Persistent data rather than a file beside the .aex, because Program Files is
+	not writable by a normal user and a plug-in that needs elevation to remember
+	something is a plug-in nobody configures. */
+static void
+LoadAppPath(AEGP_SuiteHandler &suites)
+{
+	A_Err	err2 = A_Err_NONE, err = A_Err_NONE;
+
+	AEGP_PersistentBlobH blobH = NULL;
+
+	ERR2(suites.PersistentDataSuite4()->AEGP_GetApplicationBlob(
+			AEGP_PersistentType_MACHINE_SPECIFIC, &blobH));
+
+	if (!blobH) {
+		return;
+	}
+	ERR2(suites.PersistentDataSuite4()->AEGP_GetString(blobH,
+			PHYSBRIDGE_PREF_SECTION, PHYSBRIDGE_PREF_APP, "",
+			sizeof(S_app_path), S_app_path, NULL));
+}
+
+static void
+SaveAppPath(AEGP_SuiteHandler &suites, const char *pathZ)
+{
+	A_Err	err2 = A_Err_NONE, err = A_Err_NONE;
+
+	AEGP_PersistentBlobH blobH = NULL;
+
+	strncpy_s(S_app_path, sizeof(S_app_path), pathZ, _TRUNCATE);
+
+	ERR2(suites.PersistentDataSuite4()->AEGP_GetApplicationBlob(
+			AEGP_PersistentType_MACHINE_SPECIFIC, &blobH));
+
+	if (blobH) {
+		ERR2(suites.PersistentDataSuite4()->AEGP_SetString(blobH,
+				PHYSBRIDGE_PREF_SECTION, PHYSBRIDGE_PREF_APP, pathZ));
+	}
+}
+
+//	{"cmd":"register_app","script":"<absolute path to the app exe>"}
+static void
+DoRegisterApp(AEGP_SuiteHandler &suites, const BridgeRequest *rP)
+{
+	if (!rP->arg[0]) {
+		PipeWriteError("register_app needs the application's path");
+		return;
+	}
+	SaveAppPath(suites, rP->arg);
+	Log("  register_app: %s\n", rP->arg);
+	PipeWriteLine("{\"ok\":true,\"registered\":true}");
+}
+
+/*	Open the application from the Composition menu.
+
+	If it is already running the pipe answers, and starting a SECOND copy would
+	put two processes on one work directory, both writing one bake.json. So a
+	live bridge client means "it is already open" and the right thing is to say
+	so rather than launch again.
+
+	ShellExecute rather than CreateProcess: the app is a normal GUI program, this
+	is exactly the "open this document" case, and it does not leave AE holding
+	handles to a child it has no interest in. */
+static void
+LaunchApp(AEGP_SuiteHandler &suites)
+{
+	A_Err	err2 = A_Err_NONE, err = A_Err_NONE;
+
+	if (!S_app_path[0]) {
+		LoadAppPath(suites);
+	}
+	if (!S_app_path[0]) {
+		ERR2(suites.UtilitySuite3()->AEGP_ReportInfo(S_my_id,
+				"The physics application has not been opened yet, so After "
+				"Effects does not know where it is.\r\r"
+				"Open it once by hand -- it registers itself with this plug-in "
+				"on launch -- and this menu item will work from then on."));
+		return;
+	}
+	if (S_connected) {
+		ERR2(suites.UtilitySuite3()->AEGP_ReportInfo(S_my_id,
+				"The physics application is already open.\r\r"
+				"A second copy would share one work folder with the first and "
+				"both would write the same bake."));
+		return;
+	}
+
+	HINSTANCE rc = ShellExecuteA(NULL, "open", S_app_path, NULL, NULL, SW_SHOWNORMAL);
+
+	if ((INT_PTR)rc <= 32) {
+		char msg[1200];
+
+		sprintf_s(msg, sizeof(msg),
+				"Could not start the physics application (code %d).\r\r%s\r\r"
+				"If it has moved, open it once by hand to re-register it.",
+				(int)(INT_PTR)rc, S_app_path);
+		ERR2(suites.UtilitySuite3()->AEGP_ReportInfo(S_my_id, msg));
+	}
+}
+
 // ---------------------------------------------------------------------------
 //	hooks
 // ---------------------------------------------------------------------------
@@ -2460,6 +2573,8 @@ IdleHook(AEGP_GlobalRefcon, AEGP_IdleRefcon, A_long *max_sleepPL)
 			DoApplyBake(suites, &r);
 		} else if (!strcmp(r.cmd, "focus_ae")) {
 			DoFocusAE(suites);
+		} else if (!strcmp(r.cmd, "register_app")) {
+			DoRegisterApp(suites, &r);
 		} else if (!strcmp(r.cmd, "_overflow")) {
 			PipeWriteError("the request line exceeded the bridge's cap and "
 							"was refused");
@@ -2499,6 +2614,11 @@ CommandHook(AEGP_GlobalRefcon, AEGP_CommandRefcon, AEGP_Command command,
 
 		ERR(suites.UtilitySuite3()->AEGP_ReportInfo(S_my_id, msg));
 		*handledPB = TRUE;
+	} else if (command == S_launch_cmd) {
+		AEGP_SuiteHandler suites(sP);
+
+		LaunchApp(suites);
+		*handledPB = TRUE;
 	}
 	return err;
 }
@@ -2510,6 +2630,7 @@ UpdateMenuHook(AEGP_GlobalRefcon, AEGP_UpdateMenuRefcon, AEGP_WindowType)
 	AEGP_SuiteHandler	suites(sP);
 
 	ERR(suites.CommandSuite1()->AEGP_EnableCommand(S_status_cmd));
+	ERR(suites.CommandSuite1()->AEGP_EnableCommand(S_launch_cmd));
 	return err;
 }
 
@@ -2558,6 +2679,14 @@ EntryPointFunc(
 	ERR(suites.CommandSuite1()->AEGP_GetUniqueCommand(&S_status_cmd));
 	ERR(suites.CommandSuite1()->AEGP_InsertMenuCommand(S_status_cmd,
 			PHYSBRIDGE_MENU_NAME, AEGP_Menu_WINDOW, AEGP_MENU_INSERT_SORTED));
+
+	/*	Composition, not Window: this opens a tool that acts on the comp you
+		are in, which is where AE puts Pre-compose and Comp Settings. The
+		status item stays under Window, where a diagnostic belongs. */
+	ERR(suites.CommandSuite1()->AEGP_GetUniqueCommand(&S_launch_cmd));
+	ERR(suites.CommandSuite1()->AEGP_InsertMenuCommand(S_launch_cmd,
+			PHYSBRIDGE_LAUNCH_NAME, AEGP_Menu_COMPOSITION,
+			AEGP_MENU_INSERT_AT_BOTTOM));
 
 	ERR(suites.RegisterSuite5()->AEGP_RegisterCommandHook(S_my_id,
 			AEGP_HP_BeforeAE, AEGP_Command_ALL, CommandHook, 0));

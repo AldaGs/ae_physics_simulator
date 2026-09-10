@@ -64,6 +64,13 @@
 
 #define PHYSBRIDGE_NAME			"PhysBridge C0 spike"
 #define PHYSBRIDGE_MENU_NAME	"PhysBridge: bridge status"
+#define PHYSBRIDGE_LAUNCH_NAME	"Physics Simulator"
+
+/*	Where the app registered itself. See LaunchApp: the plug-in never guesses
+	at the executable's location, because the AEGP is in Program Files and the
+	app is wherever it was built. */
+#define PHYSBRIDGE_PREF_SECTION	"PhysBridge"
+#define PHYSBRIDGE_PREF_APP		"app_path"
 
 //	Distinct from pieFX's names so both plug-ins can be loaded at once. A spike
 //	that forces you to uninstall the thing you are modelling it on is a spike
