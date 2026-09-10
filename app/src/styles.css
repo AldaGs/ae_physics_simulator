@@ -354,3 +354,63 @@ summary::marker {
   color: var(--dim);
   flex: 1;
 }
+
+
+/* -- C2, the viewport ---------------------------------------------------- */
+
+#vp-canvas {
+  display: block;
+  width: 100%;
+  /* The comp box is drawn to fit inside whatever this is, so the aspect here
+     only decides how much letterboxing there is, not what is visible. */
+  height: 320px;
+  background: #0e1013;
+  border: 1px solid var(--line, #2a2f36);
+  border-radius: 4px;
+}
+
+.vp-transport {
+  align-items: center;
+  gap: 8px;
+}
+
+#vp-scrub {
+  flex: 1;
+  min-width: 120px;
+}
+
+.vp-legend {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.vp-legend li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--line, #2a2f36);
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 12px;
+  user-select: none;
+}
+
+.vp-legend li.off {
+  opacity: 0.4;
+}
+
+.vp-legend .swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.vp-legend .pinned {
+  opacity: 0.6;
+  font-style: italic;
+}

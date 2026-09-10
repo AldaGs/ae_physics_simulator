@@ -72,6 +72,13 @@ struct ApplyReply {
     ms: u128,
 }
 
+/// Geometry and keyframes, verbatim. Parsed by the front end, never here.
+#[derive(serde::Serialize)]
+struct Viewport {
+    render: String,
+    bake: String,
+}
+
 fn work_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
@@ -213,6 +220,33 @@ async fn apply_bake(
         verdict,
         reply,
         ms: t0.elapsed().as_millis(),
+    })
+}
+
+/// The two documents the viewport draws from, as TEXT.
+///
+/// Rust does not parse either one. C1.1's rule holds: `ae-physics-scene` and
+/// `ae-physics-bake` already have two implementations that must agree, and a
+/// third in Rust reading the same fields would be a third place to drift. The
+/// front end owns the TRANSFORM -- `position + R(theta) * (v - anchor)` and
+/// linear sampling -- which is the one part a canvas cannot delegate, and
+/// `c2_render_model.py` checks that arithmetic against `preview.py` at
+/// fractional frames, where A5 says the damage hides.
+#[tauri::command]
+fn load_viewport(app: tauri::AppHandle) -> Result<Viewport, String> {
+    let dir = work_dir(&app)?;
+    let render = dir.join("render.json");
+    let bake = dir.join("bake.json");
+
+    if !render.exists() || !bake.exists() {
+        return Err("there is nothing to look at yet -- run the solver first."
+            .into());
+    }
+    Ok(Viewport {
+        render: std::fs::read_to_string(&render)
+            .map_err(|e| format!("could not read {}: {e}", render.display()))?,
+        bake: std::fs::read_to_string(&bake)
+            .map_err(|e| format!("could not read {}: {e}", bake.display()))?,
     })
 }
 
@@ -373,7 +407,8 @@ pub fn run() {
             log_js,
             probe_paths,
             verify_bake,
-            apply_bake
+            apply_bake,
+            load_viewport
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

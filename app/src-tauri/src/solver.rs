@@ -45,6 +45,9 @@ pub struct SolveResult {
     pub refused: bool,
     pub bake_path: String,
     pub preview_path: String,
+    /// The viewport's geometry. Empty when the run refused or failed, for the
+    /// same reason `bake_path` is: there is nothing to look at.
+    pub render_path: String,
     pub stdout: String,
     pub stderr: String,
     pub exit_code: Option<i32>,
@@ -82,6 +85,11 @@ pub fn solve(
 
     let bake: PathBuf = out_dir.join("bake.json");
     let preview: PathBuf = out_dir.join("preview.png");
+    /*  C2. The viewport draws polygons, and turning a comp into polygons is
+        the ~1,200 lines of geometry A3 and A4 verified -- so B3 emits them and
+        the app never interprets a bezier. The transform on top of them is the
+        three lines the viewport cannot avoid owning. */
+    let render: PathBuf = out_dir.join("render.json");
 
     let mut args: Vec<String> = vec![
         script.display().to_string(),
@@ -100,6 +108,8 @@ pub fn solve(
         params.friction.to_string(),
         "--elasticity".into(),
         params.elasticity.to_string(),
+        "--render-model".into(),
+        render.display().to_string(),
     ];
     // Absent, not defaulted: with no --frames, B3 uses the comp's duration,
     // and there is no number this app could pass that means the same thing.
@@ -149,6 +159,11 @@ pub fn solve(
         },
         preview_path: if out.status.success() && preview.exists() {
             preview.display().to_string()
+        } else {
+            String::new()
+        },
+        render_path: if out.status.success() && render.exists() {
+            render.display().to_string()
         } else {
             String::new()
         },

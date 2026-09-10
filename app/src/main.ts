@@ -28,6 +28,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import { Viewport } from "./viewport";
 
 // --------------------------------------------------------------------------
 // The shapes we read out of the two documents. Partial on purpose: see above.
@@ -272,10 +273,12 @@ async function simulate() {
       result.innerHTML =
         `<h3>Bake written</h3><pre>${esc(r.stdout.trim())}</pre>` +
         `<p class="hint">${esc(r.bake_path)}</p>` +
-        `<p class="hint">Apply it in AE with b2_apply_bake.jsx. The viewport ` +
-        `that lets you check it before applying is C2 — until then the ` +
-        `preview PNG is the only look you get, and A5 is the argument for why ` +
-        `looking matters.</p>`;
+        `<p class="hint">Scrub it in the viewport below before applying. ` +
+        `A5's whole point is that a still cannot show you a bad tween.</p>`;
+      // Opened without being asked to. The argument for C2 is that looking
+      // should not be an extra step somebody skips, and a viewport nobody
+      // opens is a contact sheet with more clicks.
+      void loadViewport();
     } else if (r.refused) {
       // Not a failure. B3 finished, and the answer is no.
       result.className = "warn";
@@ -435,6 +438,103 @@ async function applyBake(force = false) {
   }
 }
 
+
+// --------------------------------------------------------------------------
+// C2 -- the viewport
+// --------------------------------------------------------------------------
+
+const PALETTE = [
+  "#e86a54", "#4e9ad0", "#7ec46c", "#eeba4a",
+  "#a87cd0", "#56c6be", "#e284b2", "#969696",
+];
+
+let vp: Viewport | null = null;
+
+/**
+ * Show the bake that was just written.
+ *
+ * Called after a successful simulate rather than on demand: the whole argument
+ * for C2 is that looking should not be an extra step somebody skips. A5's
+ * finding is that the fault you cannot see is the one between keyframes, and a
+ * viewport nobody opens is a contact sheet with more clicks.
+ */
+async function loadViewport() {
+  const panel = $("viewport-panel");
+  try {
+    const v = await invoke<{ render: string; bake: string }>("load_viewport");
+    if (!vp) {
+      vp = new Viewport($<HTMLCanvasElement>("vp-canvas"), (t, max) => {
+        $("vp-frame").textContent = `frame ${t.toFixed(2)} / ${max}`;
+        const sc = $<HTMLInputElement>("vp-scrub");
+        if (document.activeElement !== sc) sc.value = String(t);
+      });
+    }
+    vp.load(v.render, v.bake);
+
+    const sc = $<HTMLInputElement>("vp-scrub");
+    sc.max = String(vp.duration);
+    sc.value = "0";
+
+    const list = $("vp-layers");
+    list.innerHTML = "";
+    vp.layers.forEach((L, i) => {
+      const li = document.createElement("li");
+      li.innerHTML =
+        `<span class="swatch" style="background:${
+          L.static ? "#4a525c" : PALETTE[i % PALETTE.length]
+        }"></span>` +
+        `<span${L.static ? ' class="pinned"' : ""}>${esc(L.name)}${
+          L.static ? " (pinned)" : ""
+        }</span>`;
+      li.addEventListener("click", () => {
+        vp!.toggle(L.id);
+        li.classList.toggle("off", vp!.isHidden(L.id));
+      });
+      list.appendChild(li);
+    });
+
+    panel.hidden = false;
+    // The canvas has no size until the panel is shown, so the first draw has
+    // to happen after it becomes visible or it paints into a 0x0 backing store.
+    vp.draw();
+  } catch (e) {
+    // Not fatal and NOT shouted about. "No bake yet" is the state the app
+    // opens in, and report() would put an error banner across the window for
+    // it. It goes to Rust's stderr and no further.
+    panel.hidden = true;
+    invoke("log_js", { message: `viewport: ${String(e)}` }).catch(() => {});
+  }
+}
+
+function wireViewport() {
+  const play = $<HTMLButtonElement>("vp-play");
+  play.addEventListener("click", () => {
+    if (!vp) return;
+    if (vp.isPlaying) {
+      vp.pause();
+      play.textContent = "Play";
+    } else {
+      vp.play();
+      play.textContent = "Pause";
+    }
+  });
+
+  $<HTMLInputElement>("vp-scrub").addEventListener("input", (e) => {
+    if (!vp) return;
+    vp.pause();
+    play.textContent = "Play";
+    vp.seek(parseFloat((e.target as HTMLInputElement).value));
+  });
+
+  // A quarter frame is the smallest step that is unambiguously BETWEEN two
+  // keyframes of a one-key-per-frame bake, which is where A5 says to look.
+  $("vp-step-back").addEventListener("click", () => vp?.seek(vp.frame - 0.25));
+  $("vp-step-fwd").addEventListener("click", () => vp?.seek(vp.frame + 0.25));
+
+  // Redraw on resize: the comp is fitted to the canvas, so the mapping changes.
+  window.addEventListener("resize", () => vp?.draw());
+}
+
 // --------------------------------------------------------------------------
 // Controls
 // --------------------------------------------------------------------------
@@ -507,6 +607,9 @@ async function boot() {
   $("simulate").addEventListener("click", simulate);
   $("verify").addEventListener("click", verifyBake);
   $("apply").addEventListener("click", () => applyBake(false));
+  wireViewport();
+  // A bake from a previous session is still worth looking at.
+  void loadViewport();
   $("probe").addEventListener("click", async () => {
     const out = $("probe-result");
     out.className = "";
