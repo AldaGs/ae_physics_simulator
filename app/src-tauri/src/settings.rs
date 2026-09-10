@@ -67,10 +67,43 @@ pub struct Params {
     pub frames: Option<u32>,
     pub friction: f64,
     pub elasticity: f64,
-    /// Layer names or ids to pin. B3 takes `--static` repeatedly.
+    /// Layer ids to pin. B3 takes `--static` repeatedly.
+    ///
+    /// IDS, not names: AE allows duplicate layer names, so a name does not
+    /// identify a layer. The front end migrates settings written before that
+    /// was fixed.
     pub statics: Vec<String>,
+    /// Per-layer physics, keyed by layer id, over the scene-wide values above.
+    ///
+    /// The solver was ALWAYS per-body -- `sim.PolyBody` carries density,
+    /// friction and elasticity on every spec. What made a scene uniform was
+    /// b3_loop stamping the globals over all of them. So these are not a new
+    /// capability, they are the existing one becoming reachable.
+    ///
+    /// Absent is not zero. A layer with no entry inherits the scene value, and
+    /// a layer with `friction: 0.0` was deliberately made frictionless -- the
+    /// same distinction `frames: None` draws against `frames: 0`.
+    pub layer_params: std::collections::BTreeMap<String, LayerParams>,
     pub no_walls: bool,
     pub allow_escapes: bool,
+}
+
+/// One layer's overrides. Every field optional, because an unset control has
+/// to be distinguishable from one set to zero.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LayerParams {
+    /// Kilograms. B3 back-solves density from the layer's own area, because
+    /// mass = density * area and only the geometry side knows the area.
+    pub mass: Option<f64>,
+    pub friction: Option<f64>,
+    pub bounce: Option<f64>,
+}
+
+impl LayerParams {
+    pub fn is_empty(&self) -> bool {
+        self.mass.is_none() && self.friction.is_none() && self.bounce.is_none()
+    }
 }
 
 impl Default for Params {
@@ -83,6 +116,7 @@ impl Default for Params {
             friction: 0.6,
             elasticity: 0.2,
             statics: Vec::new(),
+            layer_params: std::collections::BTreeMap::new(),
             no_walls: false,
             allow_escapes: false,
         }

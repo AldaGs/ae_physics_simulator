@@ -572,3 +572,41 @@ summary::marker {
   max-height: 220px;
   overflow: auto;
 }
+
+
+/* -- per-layer physics --------------------------------------------------- */
+
+.layer-physics {
+  grid-column: 2 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.layer-physics label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--dim, #8b949e);
+  cursor: auto;
+}
+
+.layer-physics input {
+  width: 100%;
+  padding: 3px 5px;
+  font-size: 12px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/*  A placeholder is the INHERITED value, so an empty box reads as "same as the
+    scene" rather than as "nothing". The difference between blank and 0 is the
+    whole point of these boxes. */
+.layer-physics input::placeholder {
+  opacity: 0.45;
+  font-style: italic;
+}

@@ -121,6 +121,33 @@ pub fn solve(
         args.push("--static".into());
         args.push(s.clone());
     }
+
+    /*  Per-layer physics, as ID=VALUE pairs.
+
+        Keyed by id and never by name, and B3 refuses an ambiguous name rather
+        than applying it to every layer that shares one. That ambiguity has
+        caused the same bug three times now -- Phase A dropped a layer by
+        keying the bake on name, and the shell's own pin control pinned both
+        halves of a matching pair.
+
+        Only the fields that are SET are passed. An absent flag means the layer
+        inherits the scene value, which is not the same as passing the scene
+        value explicitly: the bake's source block then records that the layer
+        was left alone. */
+    for (id, lp) in &params.layer_params {
+        if let Some(v) = lp.mass {
+            args.push("--layer-mass".into());
+            args.push(format!("{id}={v}"));
+        }
+        if let Some(v) = lp.friction {
+            args.push("--layer-friction".into());
+            args.push(format!("{id}={v}"));
+        }
+        if let Some(v) = lp.bounce {
+            args.push("--layer-bounce".into());
+            args.push(format!("{id}={v}"));
+        }
+    }
     if params.no_walls {
         args.push("--no-walls".into());
     }

@@ -51,6 +51,15 @@ type Scene = {
 
 type Paths = { python: string; proto_dir: string };
 
+/** One layer's overrides. Undefined means "inherit the scene value", which is
+ *  not the same as 0 -- a layer set to friction 0 was deliberately made
+ *  frictionless. Same distinction as `frames: null` against `frames: 0`. */
+type LayerParams = {
+  mass?: number | null;
+  friction?: number | null;
+  bounce?: number | null;
+};
+
 type Params = {
   gravity: number;
   ppm: number;
@@ -59,6 +68,7 @@ type Params = {
   friction: number;
   elasticity: number;
   statics: string[];
+  layer_params: Record<string, LayerParams>;
   no_walls: boolean;
   allow_escapes: boolean;
 };
@@ -198,13 +208,22 @@ function renderScene() {
         <span class="meta">id ${l.id}${
           dupes.has(l.name) ? " · name not unique" : ""
         }${notes.length ? " · " + esc(notes.join(" · ")) : ""}</span>
+        ${isPinned ? "" : physicsFields(l.id)}
       </li>`;
     })
     .join("");
 
   for (const el of Array.from($("layers").children)) {
-    el.addEventListener("click", () => togglePin((el as HTMLElement).dataset.id!));
+    // The pin is the row; the physics fields are not. Without this a click in
+    // a number box would also pin the layer, which is the kind of control that
+    // makes people stop trusting a panel.
+    el.addEventListener("click", (ev) => {
+      const t = ev.target as HTMLElement;
+      if (t.closest(".layer-physics")) return;
+      togglePin((el as HTMLElement).dataset.id!);
+    });
   }
+  wireLayerParams();
 
   const w = scene.warnings ?? [];
   $("warnings").innerHTML = w.length
@@ -212,6 +231,84 @@ function renderScene() {
       w.map((s) => `<li>${esc(s)}</li>`).join("") +
       "</ul>"
     : "";
+}
+
+/**
+ * Per-layer mass, friction and bounce.
+ *
+ * Not a new capability: `sim.PolyBody` has carried density, friction and
+ * elasticity on every spec since A3, and `sim` reads them per shape. What made
+ * a scene uniform was four lines in `b3_loop.py` stamping the scene-wide
+ * values over all of them. These controls let the values that already existed
+ * differ.
+ *
+ * MASS RATHER THAN DENSITY, and the back-solve is not here.
+ *
+ * The solver takes density, and mass = density * area. A "mass" box that set
+ * density would make two layers of different size behave nothing alike at the
+ * same number, which is not what anyone means by mass. Working out the area is
+ * geometry, so B3 does it -- `--layer-mass ID=KG` back-solves against the
+ * layer's own convex parts. Doing it here would mean reimplementing
+ * `compound_mass_properties` in TypeScript to guess at a number Python already
+ * has, which is the drift C2 was shaped to avoid.
+ *
+ * A BLANK BOX IS NOT A ZERO. Blank means "inherit the scene value" and 0 means
+ * "this layer has none". The placeholder shows what is being inherited, so the
+ * difference is visible without reading a tooltip.
+ */
+function physicsFields(id: number): string {
+  const lp = settings.params.layer_params[String(id)] ?? {};
+  const box = (
+    key: keyof LayerParams,
+    label: string,
+    placeholder: string,
+    step: string,
+  ) =>
+    `<label>${label}
+      <input type="number" step="${step}" data-layer="${id}" data-key="${key}"
+             placeholder="${placeholder}"
+             value="${lp[key] ?? ""}" />
+    </label>`;
+
+  return `<div class="layer-physics">
+    ${box("mass", "mass", "auto", "0.1")}
+    ${box("friction", "friction", String(settings.params.friction), "0.05")}
+    ${box("bounce", "bounce", String(settings.params.elasticity), "0.05")}
+  </div>`;
+}
+
+function wireLayerParams() {
+  for (const el of Array.from(
+    document.querySelectorAll<HTMLInputElement>(".layer-physics input"),
+  )) {
+    el.addEventListener("input", () => {
+      const id = el.dataset.layer!;
+      const key = el.dataset.key as keyof LayerParams;
+      const raw = el.value.trim();
+      const table = settings.params.layer_params;
+      const entry = table[id] ?? (table[id] = {});
+
+      if (raw === "") {
+        delete entry[key];
+      } else {
+        const v = parseFloat(raw);
+        // A half-typed number is not a value to save, and NaN in the settings
+        // file reads back as a broken file that silently resets everything.
+        if (Number.isNaN(v)) return;
+        entry[key] = v;
+      }
+      // An entry with nothing in it would otherwise accumulate for every layer
+      // anyone ever clicked into.
+      if (
+        entry.mass === undefined &&
+        entry.friction === undefined &&
+        entry.bounce === undefined
+      ) {
+        delete table[id];
+      }
+      persist();
+    });
+  }
 }
 
 /**
@@ -227,8 +324,16 @@ function renderScene() {
  */
 function togglePin(id: string) {
   const at = settings.params.statics.indexOf(id);
-  if (at >= 0) settings.params.statics.splice(at, 1);
-  else settings.params.statics.push(id);
+  if (at >= 0) {
+    settings.params.statics.splice(at, 1);
+  } else {
+    settings.params.statics.push(id);
+    // A pinned layer is static: infinite mass, and it never moves. Mass and
+    // bounce on it would be settings that read as if they did something. Its
+    // friction still matters -- things slide along a ramp -- but B3 takes that
+    // from the scene value for statics, so the row keeps nothing.
+    delete settings.params.layer_params[id];
+  }
   persist();
   renderScene();
 }
