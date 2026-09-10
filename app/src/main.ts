@@ -79,6 +79,15 @@ type Verdict = {
   live_comp: string;
 };
 
+/** The AEGP's own tally, parsed only to show it. */
+type ApplyReply = {
+  ok: boolean;
+  stale: boolean;
+  verdict: Verdict | null;
+  reply: string;
+  ms: number;
+};
+
 type SolveResult = {
   ok: boolean;
   refused: boolean;
@@ -346,6 +355,86 @@ async function verifyBake() {
   }
 }
 
+
+/**
+ * Apply, with Wall K in front of it.
+ *
+ * The staleness check runs in the BACKEND, before the bridge is touched, so it
+ * cannot be bypassed by a front end that forgot to look. A stale bake comes
+ * back as `stale: true` rather than an error, because the guard doing its job
+ * is not a failure - and the answer to it is a question rather than a refusal:
+ * re-reading after moving a layer you did not simulate is legitimate, and only
+ * the person knows which it was.
+ */
+async function applyBake(force = false) {
+  const btn = $<HTMLButtonElement>("apply");
+  const box = $("verify-result");
+  btn.disabled = true;
+  btn.textContent = force ? "applying..." : "checking...";
+  box.hidden = false;
+  box.className = "";
+  box.textContent = force
+    ? "writing keyframes..."
+    : "checking the comp, then writing keyframes...";
+  try {
+    const r = await invoke<ApplyReply>("apply_bake", { force });
+
+    if (r.stale && r.verdict) {
+      const v = r.verdict;
+      const named = v.reasons.length
+        ? `<ul>${v.reasons.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`
+        : `<p>Same comp, same layers, same names \u2014 the difference is ` +
+          `geometric. Something moved since this was simulated.</p>`;
+      box.className = "warn";
+      box.innerHTML =
+        `<h3>Nothing was written: the comp has changed</h3>` +
+        named +
+        `<p class="hint">bake ${esc(v.bake_sha256.slice(0, 16))}\u2026 vs comp ` +
+        `${esc(v.live_sha256.slice(0, 16))}\u2026</p>`;
+      const again = document.createElement("button");
+      again.className = "ghost";
+      again.textContent = "Apply anyway";
+      again.addEventListener("click", () => applyBake(true));
+      box.appendChild(again);
+      return;
+    }
+
+    const t = JSON.parse(r.reply || "{}");
+    const perKey = typeof t.us_per_key === "number" ? t.us_per_key : null;
+    // C0.3's read-back, surfaced rather than buried: if AE ever stops clearing
+    // spatial auto-bezier by itself, every motion path between keyframes bows
+    // and no still frame shows it. A5 spent a whole phase on that failure.
+    const bezier =
+      t.autobezier_still_set > 0
+        ? `<p class="hint"><b>Warning:</b> spatial auto-bezier is still set on ` +
+          `${esc(String(t.autobezier_still_set))} of ` +
+          `${esc(String(t.autobezier_sampled))} sampled keys. The motion path ` +
+          `bows between keyframes. C0.3 measured this pass as unnecessary \u2014 ` +
+          `if you are seeing this, that assumption has stopped holding.</p>`
+        : "";
+    box.className = "good";
+    box.innerHTML =
+      `<h3>Applied</h3>` +
+      `<p>${esc(String(t.keys ?? "?"))} keyframes across ` +
+      `${esc(String(t.layers ?? "?"))} layers in ` +
+      `${esc(String(Math.round(t.ms ?? r.ms)))} ms` +
+      (perKey ? ` \u2014 ${esc(perKey.toFixed(1))} \u00b5s/key` : "") +
+      `.</p>` +
+      (t.skipped_static
+        ? `<p class="hint">${esc(String(t.skipped_static))} pinned layer(s) ` +
+          `got no keyframes at all, which is B3's rule: writing even a ` +
+          `constant would overwrite your own placement.</p>`
+        : "") +
+      bezier +
+      `<p class="hint">One Undo puts the comp back.</p>`;
+  } catch (e) {
+    fail(String(e), box);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Apply to AE";
+  }
+}
+
 // --------------------------------------------------------------------------
 // Controls
 // --------------------------------------------------------------------------
@@ -417,6 +506,7 @@ async function boot() {
   $("read").addEventListener("click", readScene);
   $("simulate").addEventListener("click", simulate);
   $("verify").addEventListener("click", verifyBake);
+  $("apply").addEventListener("click", () => applyBake(false));
   $("probe").addEventListener("click", async () => {
     const out = $("probe-result");
     out.className = "";

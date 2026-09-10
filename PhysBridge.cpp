@@ -1661,6 +1661,722 @@ StopPipeServer(void)
 }
 
 // ---------------------------------------------------------------------------
+//	reading a bake  (a document, not a protocol line)
+// ---------------------------------------------------------------------------
+
+/*	JsonStr above is the right size for the PROTOCOL: one flat object, string
+	values, no nesting. A bake is a different kind of document -- nested
+	objects, arrays of arrays, thousands of numbers -- and `strstr` for a key
+	name is actively dangerous in it, because "name" occurs inside the source
+	block, inside every layer, and inside any comp a user called "name".
+
+	So this is a second reader, structural rather than textual: it walks
+	values, it knows where one ends, and a lookup only ever searches the keys
+	of ONE object. It is still deliberately small -- no DOM, no allocation. It
+	returns POINTERS INTO the buffer, so the buffer must outlive every pointer
+	taken from it.
+
+	It does not decode \u escapes, for the same reason JsonStr does not: the
+	two readers would then disagree about the same wire format, and B1's writer
+	emits neither. */
+
+static const char *
+JsonWs(const char *p)
+{
+	while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
+		p++;
+	}
+	return p;
+}
+
+/*	The end of the value starting at `p`, one past its last character.
+
+	Strings are skipped as strings -- with their escapes -- BEFORE any bracket
+	counting, which is the whole reason this is a function and not a loop with
+	a depth counter. A layer named "]" would otherwise close an array that is
+	still open, and a bake whose layer names came from a real project is
+	exactly where that happens. */
+static const char *
+JsonEnd(const char *p)
+{
+	p = JsonWs(p);
+
+	if (*p == '"') {
+		p++;
+		while (*p && *p != '"') {
+			p += (*p == '\\' && p[1]) ? 2 : 1;
+		}
+		return *p ? p + 1 : p;
+	}
+	if (*p == '{' || *p == '[') {
+		char	open	= *p;
+		char	close	= (open == '{') ? '}' : ']';
+		int		depth	= 0;
+
+		while (*p) {
+			if (*p == '"') {
+				p++;
+				while (*p && *p != '"') {
+					p += (*p == '\\' && p[1]) ? 2 : 1;
+				}
+				if (!*p) {
+					break;
+				}
+			} else if (*p == open) {
+				depth++;
+			} else if (*p == close) {
+				depth--;
+				if (!depth) {
+					return p + 1;
+				}
+			}
+			p++;
+		}
+		return p;
+	}
+	while (*p && *p != ',' && *p != '}' && *p != ']'
+			&& *p != ' ' && *p != '\n' && *p != '\r' && *p != '\t') {
+		p++;
+	}
+	return p;
+}
+
+//	The value of `nameZ` in the object at `objP`, or NULL. Searches the keys of
+//	that object only -- it never descends, which is the point.
+static const char *
+JsonMember(const char *objP, const char *nameZ)
+{
+	if (!objP) {
+		return NULL;
+	}
+	const char	*p		= JsonWs(objP);
+	size_t		want	= strlen(nameZ);
+
+	if (*p != '{') {
+		return NULL;
+	}
+	p++;
+
+	while (*p) {
+		p = JsonWs(p);
+
+		if (*p == '}') {
+			return NULL;
+		}
+		if (*p != '"') {
+			return NULL;			//	malformed; refuse rather than guess
+		}
+		const char *k = p + 1;
+		const char *ke = JsonEnd(p);		//	one past the closing quote
+
+		p = JsonWs(ke);
+		if (*p != ':') {
+			return NULL;
+		}
+		p = JsonWs(p + 1);
+
+		A_Boolean hit = ((size_t)(ke - 1 - k) == want)
+						&& !strncmp(k, nameZ, want);
+
+		if (hit) {
+			return p;
+		}
+		p = JsonWs(JsonEnd(p));
+		if (*p == ',') {
+			p++;
+		}
+	}
+	return NULL;
+}
+
+//	Element `idx` of the array at `arrP`, or NULL.
+static const char *
+JsonElem(const char *arrP, long idx)
+{
+	if (!arrP) {
+		return NULL;
+	}
+	const char *p = JsonWs(arrP);
+
+	if (*p != '[') {
+		return NULL;
+	}
+	p = JsonWs(p + 1);
+
+	for (long i = 0; *p && *p != ']'; i++) {
+		if (i == idx) {
+			return p;
+		}
+		p = JsonWs(JsonEnd(p));
+		if (*p == ',') {
+			p = JsonWs(p + 1);
+		}
+	}
+	return NULL;
+}
+
+static long
+JsonCount(const char *arrP)
+{
+	if (!arrP) {
+		return -1;
+	}
+	const char *p = JsonWs(arrP);
+
+	if (*p != '[') {
+		return -1;
+	}
+	p = JsonWs(p + 1);
+
+	long n = 0;
+
+	while (*p && *p != ']') {
+		n++;
+		p = JsonWs(JsonEnd(p));
+		if (*p == ',') {
+			p = JsonWs(p + 1);
+		}
+	}
+	return n;
+}
+
+/*	A number, reported as "was there one" separately from its value.
+
+	strtod returning 0.0 is indistinguishable from a real 0.0, and a bake is
+	full of real zeroes -- a rotation of 0, a position at the origin. A missing
+	field silently becoming 0.0 would place a layer at the top-left corner and
+	look like physics. */
+static A_Boolean
+JsonNum(const char *p, double *outP)
+{
+	if (!p) {
+		return FALSE;
+	}
+	p = JsonWs(p);
+
+	char *endP = NULL;
+	double v = strtod(p, &endP);
+
+	if (endP == p) {
+		return FALSE;
+	}
+	*outP = v;
+	return TRUE;
+}
+
+static A_Boolean
+JsonIsTrue(const char *p)
+{
+	return (p && !strncmp(JsonWs(p), "true", 4)) ? TRUE : FALSE;
+}
+
+static A_Boolean
+JsonText(const char *p, char *outZ, size_t out_max)
+{
+	if (!p) {
+		return FALSE;
+	}
+	p = JsonWs(p);
+
+	if (*p != '"') {
+		return FALSE;
+	}
+	p++;
+
+	size_t o = 0;
+
+	while (*p && *p != '"' && o + 1 < out_max) {
+		if (*p == '\\' && p[1]) {
+			p++;
+			outZ[o++] = (*p == 'n') ? '\n' : *p;
+			p++;
+		} else {
+			outZ[o++] = *p++;
+		}
+	}
+	outZ[o] = 0;
+	return TRUE;
+}
+
+// ---------------------------------------------------------------------------
+//	applying a bake  (C0.3's measurement, wired into the product)
+// ---------------------------------------------------------------------------
+
+/*	C0.3 measured the native keyframe path and then left it sitting unused
+	while the product paid ExtendScript's price. This is the wiring.
+
+	    the LINEAR pass, per key      ExtendScript 853 us    native 88.5
+	    the whole apply, per key                   872.6            117.7
+
+	about 7.4x -- a smaller and more honest number than the 10x on the pass
+	alone, because native's batch add is SLOWER than setValuesAtTimes (29-31
+	us/key against 19.6). The entire win is the interpolation pass. B2 had
+	already established that writing values is free; what costs is making them
+	mean what we meant.
+
+	WHAT THIS DOES NOT DO, AND WHY THE .JSX STAYS.
+
+	b2_apply_bake.jsx is not deleted and not deprecated. It is the reference
+	implementation: every number above is a comparison against it, and a second
+	implementation you can no longer run is a second implementation you can no
+	longer check. This command exists beside it.
+
+	THE PHASE THAT IS DELIBERATELY MISSING.
+
+	C0.3 ran four phases and found phase 3 -- clearing SPATIAL_AUTOBEZIER per
+	key -- costs more than everything else together AND grows per key with the
+	key count: 167 us/key at 1,000 and 2,765 at 12,000, which is O(n^2) overall.
+	Something inside it walks the keyframe list every time. Skipping it left
+	the motion path straight, so it is skipped here.
+
+	But C0.3 was explicit that it measured THAT and assumed WHY. Two
+	explanations fit the same evidence: AEGP_SetKeyframeSpatialTangents may
+	clear the flag as a side effect, or keyframes created through
+	AEGP_AddKeyframes may never get spatial auto-bezier in the first place. The
+	read-back happened after the tangent phase, so it could not tell them apart.
+
+	It does not matter for correctness -- either way the path comes out
+	straight -- and it matters enormously for TRUST, because the product now
+	depends on it. So this reads the flag back on a sample and REPORTS it. If
+	AE ever stops behaving the way C0.3 measured, the apply says so in its
+	reply instead of quietly bowing every motion path between keyframes, which
+	is A5's invisible failure and the one nobody can see on a still. */
+
+typedef struct {
+	long	layers;
+	long	keys;
+	long	skipped_static;
+	double	add_s;
+	double	interp_s;
+	double	tan_s;
+	long	autobezier_still_set;	//	-1 = not sampled
+	long	sampled;
+} ApplyTally;
+
+/*	One stream, from the bake's frame/value arrays.
+
+	`spatial` is FALSE for Rotation, and not as an optimisation: rotation is
+	not a spatial property and has no tangents to zero. B2 found the arity
+	belongs to the CALL rather than the property -- a 2D Position takes a
+	2-element value and a 3-element tangent -- so the value is written through
+	three_d regardless and the tangent pass is what varies. */
+static A_Err
+ApplyStream(AEGP_SuiteHandler	&suites,
+			AEGP_StreamRefH		streamH,
+			const char			*arrP,		//	[[frame, value], ...]
+			A_Boolean			spatial,
+			double				fps,
+			ApplyTally			*tallyP)
+{
+	A_Err	err = A_Err_NONE, err2 = A_Err_NONE;
+	long	n	= JsonCount(arrP);
+
+	if (n <= 0) {
+		return A_Err_NONE;			//	no keys is a legitimate answer
+	}
+
+	AEGP_AddKeyframesInfoH	akH = NULL;
+	double					t0	= NowSeconds();
+
+	ERR(suites.KeyframeSuite4()->AEGP_StartAddKeyframes(streamH, &akH));
+
+	for (long i = 0; !err && i < n; i++) {
+		const char	*kP		= JsonElem(arrP, i);
+		const char	*fP		= JsonElem(kP, 0);
+		const char	*vP		= JsonElem(kP, 1);
+		double		frame	= 0.0;
+
+		if (!JsonNum(fP, &frame)) {
+			err = A_Err_PARAMETER;
+			break;
+		}
+
+		/*	The time is built from the frame number and the comp's fps as a
+			RATIONAL, never as seconds. A_Time is a fraction for a reason: at
+			23.976 the seconds form lands between frames and AE snaps it to
+			whichever side rounding picked, which is how a bake acquires a
+			one-frame stutter that nothing in the numbers explains. */
+		A_Time	t		= { (A_long)(frame + 0.5), (A_u_long)(fps + 0.5) };
+		A_long	index	= 0;
+
+		ERR(suites.KeyframeSuite4()->AEGP_AddKeyframes(akH,
+				AEGP_LTimeMode_LayerTime, &t, &index));
+
+		AEGP_StreamValue2 v;
+
+		AEFX_CLR_STRUCT(v);
+		v.streamH = streamH;
+
+		if (JsonCount(vP) >= 2) {				//	position: [x, y]
+			double x = 0.0, y = 0.0;
+
+			if (!JsonNum(JsonElem(vP, 0), &x)
+					|| !JsonNum(JsonElem(vP, 1), &y)) {
+				err = A_Err_PARAMETER;
+				break;
+			}
+			v.val.three_d.x = x;
+			v.val.three_d.y = y;
+			v.val.three_d.z = 0.0;
+		} else {								//	rotation: a bare number
+			double a = 0.0;
+
+			if (!JsonNum(vP, &a)) {
+				err = A_Err_PARAMETER;
+				break;
+			}
+			v.val.one_d = a;
+		}
+		ERR(suites.KeyframeSuite4()->AEGP_SetAddKeyframe(akH, index, &v));
+	}
+	ERR(suites.KeyframeSuite4()->AEGP_EndAddKeyframes(TRUE, akH));
+
+	tallyP->add_s += NowSeconds() - t0;
+
+	if (err) {
+		return err;
+	}
+
+	//	Did they all land? Writing fewer keys than the bake holds is a silent
+	//	partial apply, which is worse than a failure.
+	A_long stored = 0;
+
+	ERR2(suites.KeyframeSuite4()->AEGP_GetStreamNumKFs(streamH, &stored));
+	tallyP->keys += stored;
+
+	// -- the pass Wall I is actually about ---------------------------------
+	t0 = NowSeconds();
+
+	for (A_long i = 0; !err && i < stored; i++) {
+		ERR(suites.KeyframeSuite4()->AEGP_SetKeyframeInterpolation(streamH, i,
+				AEGP_KeyInterp_LINEAR, AEGP_KeyInterp_LINEAR));
+	}
+	tallyP->interp_s += NowSeconds() - t0;
+
+	if (!spatial || err) {
+		return err;
+	}
+
+	// -- zero the spatial tangents -----------------------------------------
+	AEGP_StreamValue2 zero;
+
+	AEFX_CLR_STRUCT(zero);
+	zero.streamH = streamH;
+
+	t0 = NowSeconds();
+
+	for (A_long i = 0; !err && i < stored; i++) {
+		ERR(suites.KeyframeSuite4()->AEGP_SetKeyframeSpatialTangents(streamH,
+				i, &zero, &zero));
+	}
+	tallyP->tan_s += NowSeconds() - t0;
+
+	/*	The assumption, read back rather than trusted.
+
+		Sampled rather than exhaustive, and for a specific reason: the flag pass
+		this design SKIPS is the O(n^2) one, so reading every key back would
+		reintroduce the very cost being dodged. The stride is C0.3's -- a spread
+		of keys with the last one always included, because an endpoint is where AE
+		is most likely to treat a keyframe differently and the cheapest place for
+		this to be wrong unnoticed.
+
+		It counts rather than aborts. The keys are already written and correct in
+		value; a set flag means the PATH BETWEEN them bows, which the caller
+		should be told about plainly rather than have the apply rolled back
+		underneath it. */
+	const long	WANT = 32;
+	A_long		step = stored / WANT;
+
+	if (step < 1) {
+		step = 1;
+	}
+	if (tallyP->autobezier_still_set < 0) {
+		tallyP->autobezier_still_set = 0;
+	}
+	for (A_long i = 0; !err2 && i < stored; i += step) {
+		A_long				k		= (i + step >= stored) ? (stored - 1) : i;
+		AEGP_KeyframeFlags	flags	= AEGP_KeyframeFlag_NONE;
+
+		ERR2(suites.KeyframeSuite4()->AEGP_GetKeyframeFlags(streamH, k, &flags));
+
+		if (flags & AEGP_KeyframeFlag_SPATIAL_AUTOBEZIER) {
+			tallyP->autobezier_still_set++;
+		}
+		tallyP->sampled++;
+	}
+	return err;
+}
+
+/*	A layer's name as UTF-8, which is what the bake is written in.
+
+	AEGP_GetLayerName hands back UTF-16 in AEGP_MemHandles the caller must lock
+	and dispose -- not the A_char buffers the older suites used. Getting that
+	wrong is a leak per layer, on a path that runs once for every apply.
+
+	The SOURCE name is the fallback, and not as defensive padding: it is what
+	AE displays for a layer the user has never renamed, and what
+	b1_read_shapes.jsx recorded for it. Comparing a display name against an
+	empty override would fail on every untouched layer in the comp. */
+static void
+LayerNameUTF8(AEGP_SuiteHandler	&suites,
+			  AEGP_LayerH		layerH,
+			  char				*outZ,
+			  size_t			out_max)
+{
+	//	ERR2 writes into BOTH; err is a local sink here on purpose. A name
+	//	that could not be read comes back empty and fails the comparison
+	//	loudly, which is the outcome we want anyway.
+	A_Err			err	= A_Err_NONE,
+					err2	= A_Err_NONE;
+	AEGP_MemHandle	nameH	= NULL,
+					srcH	= NULL;
+
+	outZ[0] = 0;
+
+	ERR2(suites.LayerSuite8()->AEGP_GetLayerName(S_my_id, layerH,
+			&nameH, &srcH));
+
+	for (int pass = 0; pass < 2; pass++) {
+		AEGP_MemHandle	h = pass ? srcH : nameH;
+		A_UTF16Char		*uP = NULL;
+
+		if (!h || outZ[0]) {
+			continue;
+		}
+		ERR2(suites.MemorySuite1()->AEGP_LockMemHandle(h, (void **)&uP));
+
+		if (uP) {
+			WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)uP, -1,
+				outZ, (int)out_max, NULL, NULL);
+			ERR2(suites.MemorySuite1()->AEGP_UnlockMemHandle(h));
+		}
+	}
+	if (nameH) {
+		ERR2(suites.MemorySuite1()->AEGP_FreeMemHandle(nameH));
+	}
+	if (srcH) {
+		ERR2(suites.MemorySuite1()->AEGP_FreeMemHandle(srcH));
+	}
+}
+
+//	{"cmd":"apply_bake","script":"<absolute path to bake.json>"}
+static void
+DoApplyBake(AEGP_SuiteHandler &suites, const BridgeRequest *rP)
+{
+	A_Err	err = A_Err_NONE, err2 = A_Err_NONE;
+	char	msg[768];
+
+	// -- the document ------------------------------------------------------
+	FILE *fP = NULL;
+
+	if (fopen_s(&fP, rP->arg, "rb") || !fP) {
+		sprintf_s(msg, sizeof(msg), "cannot open the bake at '%s'", rP->arg);
+		PipeWriteError(msg);
+		return;
+	}
+	fseek(fP, 0, SEEK_END);
+	long len = ftell(fP);
+	fseek(fP, 0, SEEK_SET);
+
+	if (len <= 0) {
+		fclose(fP);
+		PipeWriteError("the bake file is empty");
+		return;
+	}
+	char *docP = (char *)malloc((size_t)len + 1);
+
+	if (!docP) {
+		fclose(fP);
+		PipeWriteError("out of memory reading the bake");
+		return;
+	}
+	size_t got = fread(docP, 1, (size_t)len, fP);
+
+	fclose(fP);
+	docP[got] = 0;
+
+	const char *layersP = JsonMember(docP, "layers");
+	long		nlayers = JsonCount(layersP);
+
+	if (nlayers <= 0) {
+		free(docP);
+		PipeWriteError("this bake has no layers array -- it is not an "
+						"ae-physics-bake document");
+		return;
+	}
+
+	// -- the comp ----------------------------------------------------------
+	AEGP_CompH	compH = NULL;
+
+	ERR(suites.CompSuite11()->AEGP_GetMostRecentlyUsedComp(&compH));
+
+	if (err || !compH) {
+		free(docP);
+		PipeWriteError("no comp is open -- open the comp this bake was made "
+						"from and try again");
+		return;
+	}
+
+	A_long		nlayers_ae	= 0;
+	A_FpLong	fps			= 0.0;
+	A_Time		frame_dur	= { 0, 1 };
+
+	ERR2(suites.LayerSuite8()->AEGP_GetCompNumLayers(compH, &nlayers_ae));
+	ERR2(suites.CompSuite11()->AEGP_GetCompFramerate(compH, &fps));
+
+	if (fps <= 0.0) {
+		free(docP);
+		PipeWriteError("the comp reports a frame rate of zero");
+		return;
+	}
+
+	/*	Wall K, the half that lives in AE.
+
+		The SHELL already re-reads the comp and compares scene hashes, which is
+		the only check that can see a moved layer -- see verify.rs. This is not
+		that check and does not replace it. It is the .jsx's tripwire, kept
+		because this command can also be driven by something that never asked
+		the shell: layer index is POSITIONAL, and applying a bake to a comp
+		whose layers were reordered writes good keyframes onto the wrong
+		objects. Cheap, and it refuses rather than warns, because there is no
+		reading of "the layer at index 3 is now called something else" that
+		makes writing to it correct. */
+	for (long i = 0; i < nlayers; i++) {
+		const char	*L = JsonElem(layersP, i);
+		double		id = 0.0;
+		char		want[128] = { 0 }, have[128] = { 0 };
+
+		if (!JsonNum(JsonMember(L, "id"), &id)) {
+			continue;
+		}
+		if ((A_long)id < 1 || (A_long)id > nlayers_ae) {
+			sprintf_s(msg, sizeof(msg),
+					"id %d (%s) is outside this comp, which has %d layers -- "
+					"nothing was written",
+					(int)id, want, (int)nlayers_ae);
+			free(docP);
+			PipeWriteError(msg);
+			return;
+		}
+		JsonText(JsonMember(L, "name"), want, sizeof(want));
+
+		AEGP_LayerH	layerH = NULL;
+
+		ERR2(suites.LayerSuite8()->AEGP_GetCompLayerByIndex(compH,
+				(A_long)id - 1, &layerH));
+
+		if (layerH) {
+			LayerNameUTF8(suites, layerH, have, sizeof(have));
+		}
+		if (strcmp(want, have)) {
+			sprintf_s(msg, sizeof(msg),
+					"id %d: the bake says '%s', this comp has '%s' -- nothing "
+					"was written. Layer index is positional; re-read the comp "
+					"if layers were added, deleted or reordered.",
+					(int)id, want, have);
+			free(docP);
+			PipeWriteError(msg);
+			return;
+		}
+	}
+
+	// -- write -------------------------------------------------------------
+	ApplyTally	tally;
+	double		wall0 = NowSeconds();
+
+	memset(&tally, 0, sizeof(tally));
+	tally.autobezier_still_set = -1;
+
+	/*	ONE undo group for the whole apply. B2 found that a throw between
+		beginUndoGroup and endUndoGroup leaves AE wedged with a half apply, so
+		every exit below this point goes through the same end -- there is no
+		early return between here and it. */
+	ERR2(suites.UtilitySuite3()->AEGP_StartUndoGroup("Apply physics bake"));
+
+	for (long i = 0; !err && i < nlayers; i++) {
+		const char	*L	= JsonElem(layersP, i);
+		double		id	= 0.0;
+
+		if (!JsonNum(JsonMember(L, "id"), &id)) {
+			continue;
+		}
+
+		/*	B3: a pinned layer gets NO keyframes at all, not a constant one.
+			Writing even a single unchanging key would overwrite the user's own
+			placement and silently undo any later nudge. */
+		if (JsonIsTrue(JsonMember(L, "static"))) {
+			tally.skipped_static++;
+			continue;
+		}
+
+		const char *kfP = JsonMember(L, "keyframes");
+		AEGP_LayerH	layerH = NULL;
+
+		ERR(suites.LayerSuite8()->AEGP_GetCompLayerByIndex(compH,
+				(A_long)id - 1, &layerH));
+
+		AEGP_StreamRefH	posH = NULL, rotH = NULL;
+
+		ERR(suites.StreamSuite2()->AEGP_GetNewLayerStream(S_my_id, layerH,
+				AEGP_LayerStream_POSITION, &posH));
+
+		if (!err && posH) {
+			err = ApplyStream(suites, posH, JsonMember(kfP, "position"),
+								TRUE, (double)fps, &tally);
+			ERR2(suites.StreamSuite2()->AEGP_DisposeStream(posH));
+		}
+
+		/*	Rotation, not Z_ROTATION: a 2D layer's rotation is the one-
+			dimensional ROTATION stream, and it has no spatial tangents to
+			zero -- which is also why B2's 853 us/key is a BLEND that flatters
+			ExtendScript. Its makeLinear() makes three calls per Position key
+			and one per Rotation key, and the cheap rotation keys pull the
+			average down. */
+		if (!err) {
+			ERR(suites.StreamSuite2()->AEGP_GetNewLayerStream(S_my_id, layerH,
+					AEGP_LayerStream_ROTATION, &rotH));
+
+			if (!err && rotH) {
+				err = ApplyStream(suites, rotH, JsonMember(kfP, "rotation"),
+									FALSE, (double)fps, &tally);
+				ERR2(suites.StreamSuite2()->AEGP_DisposeStream(rotH));
+			}
+		}
+		if (!err) {
+			tally.layers++;
+		}
+	}
+
+	ERR2(suites.UtilitySuite3()->AEGP_EndUndoGroup());
+
+	double wall_s = NowSeconds() - wall0;
+
+	free(docP);
+
+	if (err) {
+		PipeWriteError("the apply failed partway through -- one Undo puts the "
+						"comp back the way it was");
+		return;
+	}
+
+	double per_key = tally.keys ? (wall_s * 1e6 / (double)tally.keys) : 0.0;
+
+	sprintf_s(msg, sizeof(msg),
+			"{\"ok\":true,\"layers\":%ld,\"keys\":%ld,\"skipped_static\":%ld,"
+			"\"ms\":%.1f,\"us_per_key\":%.1f,\"add_ms\":%.1f,"
+			"\"interp_ms\":%.1f,\"tangents_ms\":%.1f,"
+			"\"autobezier_sampled\":%ld,\"autobezier_still_set\":%ld}",
+			tally.layers, tally.keys, tally.skipped_static,
+			wall_s * 1000.0, per_key, tally.add_s * 1000.0,
+			tally.interp_s * 1000.0, tally.tan_s * 1000.0,
+			tally.sampled, tally.autobezier_still_set);
+	PipeWriteLine(msg);
+
+	Log("  apply_bake: %ld layers, %ld keys, %.1f ms (%.1f us/key)\n",
+		tally.layers, tally.keys, wall_s * 1000.0, per_key);
+}
+
+// ---------------------------------------------------------------------------
 //	hooks
 // ---------------------------------------------------------------------------
 
@@ -1683,6 +2399,8 @@ IdleHook(AEGP_GlobalRefcon, AEGP_IdleRefcon, A_long *max_sleepPL)
 			DoPipeProbe(&r);
 		} else if (!strcmp(r.cmd, "bench_keys")) {
 			DoBenchKeys(suites, &r);
+		} else if (!strcmp(r.cmd, "apply_bake")) {
+			DoApplyBake(suites, &r);
 		} else if (!strcmp(r.cmd, "_overflow")) {
 			PipeWriteError("the request line exceeded the bridge's cap and "
 							"was refused");

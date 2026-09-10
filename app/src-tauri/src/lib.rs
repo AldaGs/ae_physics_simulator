@@ -39,6 +39,10 @@ const READER: &str = "b1_read_shapes.jsx";
 /// it is the point at which "AE has a modal open" stops looking like a hang.
 const READ_TIMEOUT: Duration = Duration::from_secs(120);
 const PING_TIMEOUT: Duration = Duration::from_secs(5);
+/// An apply writes thousands of keyframes on AE's UI thread and AE is not
+/// repainting while it does. C0.3 projected 12,000 keys at about 1.1 s
+/// natively; this is the point at which something is wrong, not a budget.
+const APPLY_TIMEOUT: Duration = Duration::from_secs(300);
 
 struct App {
     settings: Mutex<Settings>,
@@ -52,6 +56,19 @@ struct Reply {
     /// Where it was written, which is what the solver is given.
     path: String,
     bytes: usize,
+    ms: u128,
+}
+
+/// What an apply came back with, or why it did not happen.
+#[derive(serde::Serialize)]
+struct ApplyReply {
+    ok: bool,
+    /// The apply did not run because the comp no longer matches the bake.
+    /// Not a failure: the guard worked.
+    stale: bool,
+    verdict: Option<verify::Verdict>,
+    /// The AEGP's own tally, verbatim -- key counts and phase timings.
+    reply: String,
     ms: u128,
 }
 
@@ -114,6 +131,89 @@ Set the folder in              Settings -- it is the python-proto/physics_sim ch
             .to_string());
     }
     Ok(text)
+}
+
+/// Apply the bake through the AEGP, natively.
+///
+/// C0.3 measured the native keyframe path at 117.7 us/key against
+/// ExtendScript's 872.6 and then left it unused while the product paid the
+/// slow one. This is the wiring, and `b2_apply_bake.jsx` stays exactly where
+/// it is -- it is the reference implementation every one of those numbers is a
+/// comparison against, and a second implementation you can no longer run is a
+/// second implementation you can no longer check.
+///
+/// Wall K is checked FIRST, here rather than in the front end, so that a
+/// caller cannot apply a stale bake by forgetting to look. `force` is how the
+/// person overrides it, because "I moved a layer I did not simulate" is a real
+/// and legitimate thing to have done.
+#[tauri::command]
+async fn apply_bake(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, App>,
+    force: bool,
+) -> Result<ApplyReply, String> {
+    let paths = state.settings.lock().unwrap().paths.clone();
+    let bake_path = work_dir(&app)?.join("bake.json");
+    if !bake_path.exists() {
+        return Err(format!(
+            "there is no bake to apply ({} does not exist) -- run the solver \
+             first.",
+            bake_path.display()
+        ));
+    }
+
+    let verdict = if force {
+        None
+    } else {
+        let raw = std::fs::read(&bake_path)
+            .map_err(|e| format!("could not read {}: {e}", bake_path.display()))?;
+        let bake: serde_json::Value = serde_json::from_slice(&raw)
+            .map_err(|e| format!("{} is not JSON ({e})", bake_path.display()))?;
+        let live = read_scene_bytes(&paths).await?;
+        let v = verify::compare(&bake, live.as_bytes())?;
+        if !v.fresh {
+            // Not an error in the sense of something going wrong -- the check
+            // did its job. The front end turns this into a question.
+            return Ok(ApplyReply {
+                ok: false,
+                stale: true,
+                verdict: Some(v),
+                reply: String::new(),
+                ms: 0,
+            });
+        }
+        Some(v)
+    };
+
+    let payload = serde_json::json!({
+        "cmd": "apply_bake",
+        "script": bake_path.display().to_string(),
+    })
+    .to_string();
+
+    let t0 = Instant::now();
+    let reply =
+        tauri::async_runtime::spawn_blocking(move || bridge::request(&payload, APPLY_TIMEOUT))
+            .await
+            .map_err(|e| format!("the apply task did not finish: {e}"))??;
+
+    let parsed: serde_json::Value = serde_json::from_str(&reply)
+        .map_err(|e| format!("the bridge replied with something that is not JSON ({e}):\n\n{reply}"))?;
+    if parsed.get("ok") == Some(&serde_json::Value::Bool(false)) {
+        return Err(parsed
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("the bridge refused the apply and did not say why")
+            .to_string());
+    }
+
+    Ok(ApplyReply {
+        ok: true,
+        stale: false,
+        verdict,
+        reply,
+        ms: t0.elapsed().as_millis(),
+    })
 }
 
 /// Wall K: is this bake still the answer to the comp that is open NOW?
@@ -272,7 +372,8 @@ pub fn run() {
             settings_path,
             log_js,
             probe_paths,
-            verify_bake
+            verify_bake,
+            apply_bake
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
