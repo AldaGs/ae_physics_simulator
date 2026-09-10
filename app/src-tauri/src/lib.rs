@@ -273,6 +273,38 @@ async fn focus_ae() -> Result<String, String> {
     Ok(reply)
 }
 
+/// C6.3 -- draw the comp before simulating it.
+///
+/// Runs the same solver command with `--render-only`, which stops after the
+/// geometry. The bake in the work directory is deliberately left ALONE: this
+/// is a look at the scene, not a result, and deleting somebody's last sim
+/// because they re-read the comp would be its own bug. The viewport shows
+/// whichever of the two is there -- see `load_viewport`.
+#[tauri::command]
+async fn preview_scene(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, App>,
+) -> Result<solver::SolveResult, String> {
+    let (paths, params) = {
+        let s = state.settings.lock().unwrap();
+        (s.paths.clone(), s.params.clone())
+    };
+    let dir = work_dir(&app)?;
+    let scene = dir.join("scene.json");
+    if !scene.exists() {
+        return Err(
+            "no scene has been read yet -- read the comp from After Effects first."
+                .into(),
+        );
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        solver::preview(&paths, &params, &scene, &dir)
+    })
+    .await
+    .map_err(|e| format!("the preview task did not finish: {e}"))?
+}
+
 /// The two documents the viewport draws from, as TEXT.
 ///
 /// Rust does not parse either one. C1.1's rule holds: `ae-physics-scene` and
@@ -288,15 +320,27 @@ fn load_viewport(app: tauri::AppHandle) -> Result<Viewport, String> {
     let render = dir.join("render.json");
     let bake = dir.join("bake.json");
 
-    if !render.exists() || !bake.exists() {
-        return Err("there is nothing to look at yet -- run the solver first."
+    if !render.exists() {
+        return Err("there is nothing to look at yet -- read the comp first."
             .into());
     }
+    /*  C6.3. The bake is OPTIONAL, and an absent one is a STATE rather than a
+        failure: the geometry alone draws every layer at its resting pose,
+        which is the comp as it stands before any physics runs.
+
+        The front end needs no flag for this. `poseOf` already falls back to
+        `rest` for a layer with no keyframes -- it has to, because a pinned
+        layer never gets any -- so "no bake at all" is that same fallback for
+        every layer at once. */
     Ok(Viewport {
         render: std::fs::read_to_string(&render)
             .map_err(|e| format!("could not read {}: {e}", render.display()))?,
-        bake: std::fs::read_to_string(&bake)
-            .map_err(|e| format!("could not read {}: {e}", bake.display()))?,
+        bake: if bake.exists() {
+            std::fs::read_to_string(&bake)
+                .map_err(|e| format!("could not read {}: {e}", bake.display()))?
+        } else {
+            String::new()
+        },
     })
 }
 
@@ -461,6 +505,7 @@ pub fn run() {
             verify_bake,
             apply_bake,
             load_viewport,
+            preview_scene,
             focus_ae,
             register_app
         ])

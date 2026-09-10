@@ -158,15 +158,29 @@ export class Viewport {
     return this.model ? this.model.layers : [];
   }
 
+  /**
+   * `bakeText` may be EMPTY -- that is C6.3, the comp before it is simulated.
+   *
+   * Nothing below needs a flag for it. `poseOf` already falls back to `rest`
+   * when a layer has no keyframes, because a pinned layer never gets any, and
+   * an empty bake is that same fallback for every layer at once.
+   */
   load(renderText: string, bakeText: string) {
     this.model = JSON.parse(renderText);
-    const bake = JSON.parse(bakeText);
     this.baked.clear();
-    // Keyed by id, never by name: AE allows duplicate layer names and B1 found
-    // Phase A silently dropping a layer for exactly this.
-    for (const L of bake.layers as BakeLayer[]) this.baked.set(L.id, L);
+    if (bakeText) {
+      const bake = JSON.parse(bakeText);
+      // Keyed by id, never by name: AE allows duplicate layer names and B1
+      // found Phase A silently dropping a layer for exactly this.
+      for (const L of bake.layers as BakeLayer[]) this.baked.set(L.id, L);
+    }
     this.t = 0;
     this.draw();
+  }
+
+  /** Is there a simulation to scrub, or is this the resting scene? */
+  get simulated() {
+    return this.baked.size > 0;
   }
 
   toggle(id: number) {

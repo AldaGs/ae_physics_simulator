@@ -403,6 +403,13 @@ async function readScene() {
 
     renderScene();
     $<HTMLButtonElement>("simulate").disabled = false;
+    /*  C6.3. Draw what was just read, at rest, before anything is simulated.
+
+        Fire-and-forget on purpose: this is a picture, and a comp that has
+        been read successfully has been read successfully whether or not the
+        solver is configured to draw it. previewScene() puts its own failures
+        in the log and leaves the panel saying why it is empty. */
+    void previewScene();
     setBridge("up", `read ${scene.layers.length} layers, ${reply.bytes} bytes in ${reply.ms} ms`);
   } catch (e) {
     alert(e);
@@ -674,12 +681,47 @@ let vp: Viewport | null = null;
  * finding is that the fault you cannot see is the one between keyframes, and a
  * viewport nobody opens is a contact sheet with more clicks.
  */
+/**
+ * C6.3 -- the comp as it stands, before any physics.
+ *
+ * Until now the viewport had nothing to draw until a bake existed, which meant
+ * a comp whose polygons were misplaced looked exactly like a comp whose
+ * physics was wrong. B1 lost a sitting to that confusion, when A3's
+ * layer-space assumption turned out to be false in AE and the only symptom was
+ * a bake that came out wrong. Drawing before the sim separates the two: if it
+ * looks wrong here, the solver is innocent.
+ *
+ * It runs the SAME command as Simulate, stopped early. `c2_render_model.py`
+ * section 6 checks that the geometry is byte-identical either way, with a
+ * control that fires when the scene changes -- otherwise this would be a
+ * second, prettier drawing of something the solver never sees.
+ */
+async function previewScene() {
+  try {
+    const r = await invoke<SolveResult>("preview_scene");
+    if (!r.ok) {
+      // Quietly: nothing has failed from the user's point of view -- they read
+      // a comp and it worked. The log is where an unconfigured solver belongs
+      // until they press Simulate and it becomes their problem.
+      await invoke("log_js", { message: `preview: ${r.stderr || r.stdout}` });
+      return;
+    }
+    await loadViewport();
+  } catch (e) {
+    invoke("log_js", { message: `preview: ${String(e)}` }).catch(() => {});
+  }
+}
+
 async function loadViewport() {
   try {
     const v = await invoke<{ render: string; bake: string }>("load_viewport");
     if (!vp) {
       vp = new Viewport($<HTMLCanvasElement>("vp-canvas"), (t, max) => {
-        $("vp-frame").textContent = `frame ${t.toFixed(2)} / ${max}`;
+        // A frame number for a scene that was never simulated would be a lie
+        // dressed as precision: there is one pose and it is not at a time.
+        $("vp-frame").textContent = vp!.simulated
+          ? `frame ${t.toFixed(2)} / ${max}`
+          : "at rest -- not simulated";
         const sc = $<HTMLInputElement>("vp-scrub");
         if (document.activeElement !== sc) sc.value = String(t);
       });
@@ -712,6 +754,14 @@ async function loadViewport() {
     // draw or it paints into a 0x0 backing store.
     $("vp-empty").hidden = true;
     $("vp-canvas").hidden = false;
+
+    /*  Without a bake there is one pose and no time, so the transport is
+        disabled rather than hidden: a greyed-out Play says "there is nothing
+        to play YET", and a missing one says the app forgot how. */
+    const idle = !vp.simulated;
+    for (const id of ["vp-play", "vp-scrub", "vp-step-back", "vp-step-fwd"]) {
+      $<HTMLButtonElement>(id).disabled = idle;
+    }
     vp.draw();
   } catch (e) {
     // Not fatal and NOT shouted about. "No bake yet" is the state the app

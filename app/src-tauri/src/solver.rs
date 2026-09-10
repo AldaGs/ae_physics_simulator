@@ -68,6 +68,38 @@ pub fn solve(
     scene_path: &Path,
     out_dir: &Path,
 ) -> Result<SolveResult, String> {
+    run(paths, params, scene_path, out_dir, false)
+}
+
+/// C6.3 -- the scene BEFORE it is simulated.
+///
+/// The same command with `--render-only`, which stops after the geometry and
+/// before `bake_scene`. Not a second code path: `c2_render_model.py` section 6
+/// checks that the model written this way is BYTE-IDENTICAL to the one a full
+/// run writes, with a control that fires when the scene changes.
+///
+/// Why it is worth a command of its own rather than a nicety. Until now the
+/// viewport had nothing to draw until a bake existed, which meant a comp whose
+/// polygons were misplaced looked exactly like a comp whose physics was wrong
+/// -- and B1 lost a sitting to that confusion when A3's layer-space assumption
+/// turned out to be false in AE. Drawing before the sim separates them: if it
+/// looks wrong here, the solver is innocent.
+pub fn preview(
+    paths: &Paths,
+    params: &Params,
+    scene_path: &Path,
+    out_dir: &Path,
+) -> Result<SolveResult, String> {
+    run(paths, params, scene_path, out_dir, true)
+}
+
+fn run(
+    paths: &Paths,
+    params: &Params,
+    scene_path: &Path,
+    out_dir: &Path,
+    render_only: bool,
+) -> Result<SolveResult, String> {
     let script = paths.script(SOLVER);
     if !script.exists() {
         return Err(format!(
@@ -94,10 +126,19 @@ pub fn solve(
     let mut args: Vec<String> = vec![
         script.display().to_string(),
         scene_path.display().to_string(),
-        "--out".into(),
-        bake.display().to_string(),
-        "--preview".into(),
-        preview.display().to_string(),
+    ];
+    if render_only {
+        // Not passed, rather than passed and ignored: B3 writes no bake and no
+        // contact sheet in this mode, and naming files it will not create is
+        // how a command line starts lying about what it did.
+        args.push("--render-only".into());
+    } else {
+        args.push("--out".into());
+        args.push(bake.display().to_string());
+        args.push("--preview".into());
+        args.push(preview.display().to_string());
+    }
+    args.extend::<Vec<String>>(vec![
         "--gravity".into(),
         params.gravity.to_string(),
         "--ppm".into(),
@@ -110,7 +151,7 @@ pub fn solve(
         params.elasticity.to_string(),
         "--render-model".into(),
         render.display().to_string(),
-    ];
+    ]);
     // Absent, not defaulted: with no --frames, B3 uses the comp's duration,
     // and there is no number this app could pass that means the same thing.
     if let Some(f) = params.frames {
@@ -179,12 +220,12 @@ pub fn solve(
     Ok(SolveResult {
         ok: out.status.success(),
         refused: code == Some(EXIT_ESCAPED),
-        bake_path: if out.status.success() {
+        bake_path: if out.status.success() && !render_only {
             bake.display().to_string()
         } else {
             String::new()
         },
-        preview_path: if out.status.success() && preview.exists() {
+        preview_path: if out.status.success() && !render_only && preview.exists() {
             preview.display().to_string()
         } else {
             String::new()
