@@ -42,8 +42,42 @@
         </div>
       </section>
 
-      <!-- B3's parameter set, as controls. Every one of these is an argument
-           to b3_loop.py and nothing else. -->
+      <section id="viewport-panel">
+        <header>
+          <h2>Viewport</h2>
+          <span class="hint" id="vp-frame">frame 0.00</span>
+        </header>
+
+        <div id="vp-empty" class="empty">
+          Nothing simulated yet. Read a comp and press Simulate, and the bake
+          appears here to scrub before it goes anywhere near the project.
+        </div>
+
+        <canvas id="vp-canvas" hidden></canvas>
+
+        <div class="row vp-transport">
+          <button id="vp-play" class="ghost">Play</button>
+          <input id="vp-scrub" type="range" min="0" max="240" step="0.05"
+                 value="0" />
+          <button id="vp-step-back" class="ghost" title="a quarter frame back">
+            &minus;&frac14;
+          </button>
+          <button id="vp-step-fwd" class="ghost" title="a quarter frame on">
+            +&frac14;
+          </button>
+        </div>
+
+        <p class="hint">
+          The slider moves in twentieths of a frame on purpose. A per-frame
+          scrubber can only show the values we already know are correct &mdash;
+          a wrapped rotation looks identical on every still, and the damage is
+          in the tween. Layer 3 crossed 180&deg; between frames 69 and 70 in
+          the C1.2 sitting, and the sampler stepped over it.
+        </p>
+
+        <ul id="vp-layers" class="vp-legend"></ul>
+      </section>
+
       <section id="params-panel">
         <div class="panel-head">
           <h2>Simulation</h2>
@@ -96,7 +130,10 @@
           </span>
         </label>
 
-        <div id="result" hidden></div>
+        <details id="result-wrap" hidden>
+          <summary id="result-summary">Solver output</summary>
+          <div id="result"></div>
+        </details>
 
         <!-- Wall K. Separate from Simulate because it asks a different
              question: not "what happens?" but "is what I already computed
@@ -118,41 +155,6 @@
           </small>
         </div>
         <div id="verify-result" hidden></div>
-      </section>
-
-      <!-- Machine-shaped, set once. Folded away because it is not the work. -->
-      <!-- C2. A5's argument becomes the main surface: the damage from a
-           wrapped rotation is invisible on every still and lives between two
-           keyframes, so the scrubber is continuous rather than per-frame. -->
-      <section id="viewport-panel" hidden>
-        <header>
-          <h2>Viewport</h2>
-          <span class="hint" id="vp-frame">frame 0.00</span>
-        </header>
-
-        <canvas id="vp-canvas"></canvas>
-
-        <div class="row vp-transport">
-          <button id="vp-play" class="ghost">Play</button>
-          <input id="vp-scrub" type="range" min="0" max="240" step="0.05"
-                 value="0" />
-          <button id="vp-step-back" class="ghost" title="a quarter frame back">
-            &minus;&frac14;
-          </button>
-          <button id="vp-step-fwd" class="ghost" title="a quarter frame on">
-            +&frac14;
-          </button>
-        </div>
-
-        <p class="hint">
-          The slider moves in twentieths of a frame on purpose. A per-frame
-          scrubber can only show the values we already know are correct &mdash;
-          a wrapped rotation looks identical on every still, and the damage is
-          in the tween. Layer 3 crossed 180&deg; between frames 69 and 70 in
-          the C1.2 sitting, and the sampler stepped over it.
-        </p>
-
-        <ul id="vp-layers" class="vp-legend"></ul>
       </section>
 
       <section id="settings-panel">

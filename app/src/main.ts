@@ -16,7 +16,7 @@
  *
  * PINNING IS THE ONE PLACE THE TWO PANELS MEET
  * --------------------------------------------
- * Clicking a layer adds its NAME to `params.statics`, which becomes B3's
+ * Clicking a layer adds its ID to `params.statics`, which becomes B3's
  * `--static`. That is why the scene list is not decorative: it is the control
  * surface for the one parameter that is per-layer rather than per-scene.
  *
@@ -178,23 +178,32 @@ function renderScene() {
     .join("");
 
   const pinned = new Set(settings.params.statics);
+  // Two layers can share a name -- "Shape Layer 1" twice is AE's own default --
+  // so a name tells you nothing about WHICH one. Only the id does.
+  const dupes = new Set(
+    scene.layers
+      .map((l) => l.name)
+      .filter((n, i, all) => all.indexOf(n) !== i),
+  );
   $("layers").innerHTML = scene.layers
     .map((l) => {
-      const isPinned = pinned.has(l.name) || pinned.has(String(l.id));
+      const isPinned = pinned.has(String(l.id));
       const notes: string[] = [];
       if (l.paths) notes.push(`${l.paths.length} path${l.paths.length === 1 ? "" : "s"}`);
       if (l.scale_animated) notes.push("animated scale");
       if (l.motion && l.motion !== "dynamic") notes.push(l.motion);
-      return `<li class="layer${isPinned ? " pinned" : ""}" data-name="${esc(l.name)}">
+      return `<li class="layer${isPinned ? " pinned" : ""}" data-id="${l.id}">
         <span class="pin">${isPinned ? "pinned" : ""}</span>
         <span class="name">${esc(l.name)}</span>
-        <span class="meta">id ${l.id}${notes.length ? " · " + esc(notes.join(" · ")) : ""}</span>
+        <span class="meta">id ${l.id}${
+          dupes.has(l.name) ? " · name not unique" : ""
+        }${notes.length ? " · " + esc(notes.join(" · ")) : ""}</span>
       </li>`;
     })
     .join("");
 
   for (const el of Array.from($("layers").children)) {
-    el.addEventListener("click", () => togglePin((el as HTMLElement).dataset.name!));
+    el.addEventListener("click", () => togglePin((el as HTMLElement).dataset.id!));
   }
 
   const w = scene.warnings ?? [];
@@ -205,10 +214,21 @@ function renderScene() {
     : "";
 }
 
-function togglePin(name: string) {
-  const at = settings.params.statics.indexOf(name);
+/**
+ * Pin by ID.
+ *
+ * It was by NAME, and that is B1's finding walking back in through the GUI:
+ * AE allows duplicate layer names -- "Shape Layer 1" twice is the default --
+ * so clicking one of a matching pair pinned BOTH. Phase A hit this and the
+ * bake schema went to /2 to fix it; the pin control reintroduced it.
+ *
+ * B3 already matches `str(m["id"])` as well as a name, so ids work end to end
+ * with no change on the Python side.
+ */
+function togglePin(id: string) {
+  const at = settings.params.statics.indexOf(id);
   if (at >= 0) settings.params.statics.splice(at, 1);
-  else settings.params.statics.push(name);
+  else settings.params.statics.push(id);
   persist();
   renderScene();
 }
@@ -226,11 +246,27 @@ async function readScene() {
     // Pinning a layer that is no longer in the comp would silently do nothing,
     // and B3 would not complain: --static takes a name it may not find. So the
     // list is reconciled against what actually came back.
-    const present = new Set<string>();
+    // Settings written before pins were keyed by id hold NAMES. Convert the
+    // ones that can be converted without guessing: a name shared by two layers
+    // is precisely the case that was broken, and picking one of them would be
+    // inventing an answer. Those are dropped and said out loud.
+    const byName = new Map<string, number[]>();
     for (const l of scene.layers) {
-      present.add(l.name);
-      present.add(String(l.id));
+      const at = byName.get(l.name) ?? [];
+      at.push(l.id);
+      byName.set(l.name, at);
     }
+    const ids = new Set(scene.layers.map((l) => String(l.id)));
+    const ambiguous: string[] = [];
+    settings.params.statics = settings.params.statics.map((entry) => {
+      if (ids.has(entry)) return entry;
+      const hits = byName.get(entry);
+      if (hits && hits.length === 1) return String(hits[0]);
+      if (hits && hits.length > 1) ambiguous.push(entry);
+      return entry;
+    });
+
+    const present = new Set<string>(ids);
     const dropped = settings.params.statics.filter((s) => !present.has(s));
     if (dropped.length) {
       settings.params.statics = settings.params.statics.filter((s) => present.has(s));
@@ -238,6 +274,12 @@ async function readScene() {
       alert(
         `These pinned layers are not in the comp any more, so they have been ` +
           `un-pinned:\n\n  ${dropped.join("\n  ")}\n\n` +
+          (ambiguous.length
+            ? `Some were saved by NAME, and more than one layer has that ` +
+              `name (${ambiguous.join(", ")}). There is no way to tell which ` +
+              `one was meant, so they were not carried over -- pin it again.` +
+              `\n\n`
+            : "") +
           `A pin that names a layer that is not there does nothing, and the ` +
           `solver would not have said so.`,
       );
@@ -258,44 +300,64 @@ async function readScene() {
 // The solver
 // --------------------------------------------------------------------------
 
+/**
+ * The solver's console, folded away.
+ *
+ * It is diagnostic output, not the work: on a good run it prints the same
+ * eight lines every time, and it was taking the middle of the Simulation
+ * panel. But a failure is exactly when it matters, so the summary line carries
+ * the outcome and its colour, and anything that is not a clean success opens
+ * itself. Nobody needs telling twice that a bake was written; everybody needs
+ * to see why one was not.
+ */
+function showResult(state: "good" | "warn" | "bad", summary: string, html: string) {
+  const wrap = $<HTMLDetailsElement>("result-wrap");
+  const box = $("result");
+  wrap.hidden = false;
+  wrap.dataset.state = state;
+  $("result-summary").textContent = summary;
+  box.className = state;
+  box.innerHTML = html;
+  wrap.open = state !== "good";
+}
+
 async function simulate() {
   const btn = $<HTMLButtonElement>("simulate");
-  const result = $("result");
   btn.disabled = true;
-  btn.textContent = "simulating…";
-  result.hidden = false;
-  result.className = "";
-  result.textContent = "running the solver…";
+  btn.textContent = "simulating\u2026";
+  showResult("good", "running the solver\u2026", "");
   try {
     const r = await invoke<SolveResult>("simulate");
     if (r.ok) {
-      result.className = "good";
-      result.innerHTML =
-        `<h3>Bake written</h3><pre>${esc(r.stdout.trim())}</pre>` +
-        `<p class="hint">${esc(r.bake_path)}</p>` +
-        `<p class="hint">Scrub it in the viewport below before applying. ` +
-        `A5's whole point is that a still cannot show you a bad tween.</p>`;
+      showResult(
+        "good",
+        "Bake written",
+        `<pre>${esc(r.stdout.trim())}</pre>` +
+          `<p class="hint">${esc(r.bake_path)}</p>`,
+      );
       // Opened without being asked to. The argument for C2 is that looking
       // should not be an extra step somebody skips, and a viewport nobody
       // opens is a contact sheet with more clicks.
       void loadViewport();
     } else if (r.refused) {
       // Not a failure. B3 finished, and the answer is no.
-      result.className = "warn";
-      result.innerHTML =
-        `<h3>Refused: a layer left the comp</h3><pre>${esc(
-          (r.stderr || r.stdout).trim(),
-        )}</pre><p class="hint">Nothing was written. Enclose the comp, or ` +
-        `tick “write the bake even if a layer escapes” if you meant it.</p>`;
+      showResult(
+        "warn",
+        "Refused: a layer left the comp",
+        `<pre>${esc((r.stderr || r.stdout).trim())}</pre>` +
+          `<p class="hint">Nothing was written. Enclose the comp, or tick ` +
+          `\u201cwrite the bake even if a layer escapes\u201d if you meant it.</p>`,
+      );
     } else {
-      result.className = "bad";
-      result.innerHTML =
-        `<h3>The solver failed (exit ${r.exit_code ?? "?"})</h3><pre>${esc(
-          (r.stderr || r.stdout).trim(),
-        )}</pre><p class="hint">${esc(r.command)}</p>`;
+      showResult(
+        "bad",
+        `The solver failed (exit ${r.exit_code ?? "?"})`,
+        `<pre>${esc((r.stderr || r.stdout).trim())}</pre>` +
+          `<p class="hint">${esc(r.command)}</p>`,
+      );
     }
   } catch (e) {
-    fail(String(e), result);
+    showResult("bad", "The solver could not be started", `<pre>${esc(String(e))}</pre>`);
   } finally {
     btn.disabled = false;
     btn.textContent = "Simulate";
@@ -459,7 +521,6 @@ let vp: Viewport | null = null;
  * viewport nobody opens is a contact sheet with more clicks.
  */
 async function loadViewport() {
-  const panel = $("viewport-panel");
   try {
     const v = await invoke<{ render: string; bake: string }>("load_viewport");
     if (!vp) {
@@ -493,15 +554,18 @@ async function loadViewport() {
       list.appendChild(li);
     });
 
-    panel.hidden = false;
-    // The canvas has no size until the panel is shown, so the first draw has
-    // to happen after it becomes visible or it paints into a 0x0 backing store.
+    // The canvas has no size while hidden, so it is revealed BEFORE the first
+    // draw or it paints into a 0x0 backing store.
+    $("vp-empty").hidden = true;
+    $("vp-canvas").hidden = false;
     vp.draw();
   } catch (e) {
     // Not fatal and NOT shouted about. "No bake yet" is the state the app
     // opens in, and report() would put an error banner across the window for
-    // it. It goes to Rust's stderr and no further.
-    panel.hidden = true;
+    // it. The panel itself stays: it is the middle column now, and a hole
+    // where the picture goes is worse than a frame that says why it is empty.
+    $("vp-canvas").hidden = true;
+    $("vp-empty").hidden = false;
     invoke("log_js", { message: `viewport: ${String(e)}` }).catch(() => {});
   }
 }

@@ -87,16 +87,37 @@ h3 {
   margin: 0 0 6px;
 }
 
+/*  Scene | Viewport | Simulation.
+    The viewport takes the slack because it is the only panel whose usefulness
+    scales with size -- the other two are lists and number fields at any width.
+    It also stays put: A5's argument is that looking is not optional, and a
+    panel you have to go and find is one you skip. */
 main {
   display: grid;
-  grid-template-columns: minmax(300px, 1fr) minmax(340px, 1fr);
+  grid-template-columns: minmax(260px, 20rem) minmax(420px, 1fr) minmax(280px, 22rem);
   gap: 14px;
   padding: 14px 18px 28px;
   align-items: start;
 }
 
+/*  One column under about 1100px, in the reading order that matters: what was
+    read, what it looks like, what to do about it. */
+@media (max-width: 1100px) {
+  main {
+    grid-template-columns: 1fr;
+  }
+}
+
 #settings-panel {
   grid-column: 1 / -1;
+}
+
+/*  The viewport is a column, so its canvas can have the height and the
+    transport can span it. */
+#viewport-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
 }
 
 section {
@@ -413,4 +434,78 @@ summary::marker {
 .vp-legend .pinned {
   opacity: 0.6;
   font-style: italic;
+}
+
+
+/* -- C2 layout: the transport spans the frame ---------------------------- */
+
+#vp-canvas {
+  /* Fills the column and grows with the window rather than sitting at a fixed
+     320px in the middle of the layout. */
+  height: auto;
+  aspect-ratio: 16 / 9;
+  min-height: 260px;
+}
+
+#vp-empty {
+  aspect-ratio: 16 / 9;
+  min-height: 260px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 0 2rem;
+  border: 1px dashed var(--line);
+  border-radius: 4px;
+}
+
+/*  The play bar is the width of the picture it scrubs. A transport narrower
+    than its own viewport makes every frame harder to land on than it needs to
+    be, and landing on one frame is the entire point of this panel. */
+.vp-transport {
+  display: flex;
+  width: 100%;
+  margin-top: 10px;
+}
+
+#vp-play {
+  min-width: 5.5rem;
+}
+
+#vp-scrub {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* -- the solver's console, folded away ----------------------------------- */
+
+#result-wrap {
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 6px 10px;
+}
+
+#result-summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--dim, #8b949e);
+  user-select: none;
+}
+
+#result-wrap[data-state="bad"] #result-summary {
+  color: #e86a54;
+}
+
+#result-wrap[data-state="warn"] #result-summary {
+  color: #eeba4a;
+}
+
+#result-wrap #result {
+  margin-top: 8px;
+}
+
+#result-wrap pre {
+  max-height: 220px;
+  overflow: auto;
 }
