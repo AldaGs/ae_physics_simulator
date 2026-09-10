@@ -123,11 +123,45 @@ impl Default for Params {
     }
 }
 
+/// How the app behaves, as opposed to what it simulates.
+///
+/// A third section rather than more fields on `params`, for the same reason
+/// `paths` is separate: every one of those is an argument to `b3_loop.py` and
+/// nothing else, and a preference about window management is not an argument
+/// to anything.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Behaviour {
+    /// After a successful apply: "stay", "minimise" or "close".
+    ///
+    /// The keyframes are in the project at that point, so the place to look is
+    /// AE. Minimise is the default rather than close: closing throws away the
+    /// viewport, the layer list and the parameters that produced the bake, and
+    /// wanting a second look at what you just applied is not an unusual thing.
+    pub after_apply: String,
+    /// Read the comp on launch instead of waiting for the button.
+    ///
+    /// Reading is free and safe. It deliberately does NOT auto-simulate:
+    /// simulating writes a bake over the last one, and doing that to somebody
+    /// on launch is a way to lose work they had not applied yet.
+    pub autoload_scene: bool,
+}
+
+impl Default for Behaviour {
+    fn default() -> Self {
+        Self {
+            after_apply: "minimise".into(),
+            autoload_scene: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub paths: Paths,
     pub params: Params,
+    pub behaviour: Behaviour,
 }
 
 fn file(app: &tauri::AppHandle) -> Result<PathBuf, String> {

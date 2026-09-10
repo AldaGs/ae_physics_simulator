@@ -223,6 +223,27 @@ async fn apply_bake(
     })
 }
 
+/// Bring After Effects to the front.
+///
+/// Asked of the plug-in rather than done here: it is already inside AE and has
+/// `AEGP_GetMainHWND`, so the app does not need to learn about window handles
+/// or grow a Win32 dependency to move bytes.
+///
+/// Advisory, and the reply says so. Windows refuses SetForegroundWindow from a
+/// process that is neither foreground nor recently in receipt of input, which
+/// is the plug-in's exact situation -- so the app minimising itself is what
+/// actually reveals AE, and this is what raises it rather than merely
+/// uncovering it. A refusal is not an error.
+#[tauri::command]
+async fn focus_ae() -> Result<String, String> {
+    let reply = tauri::async_runtime::spawn_blocking(move || {
+        bridge::request(r#"{"cmd":"focus_ae"}"#, PING_TIMEOUT)
+    })
+    .await
+    .map_err(|e| format!("the focus task did not finish: {e}"))??;
+    Ok(reply)
+}
+
 /// The two documents the viewport draws from, as TEXT.
 ///
 /// Rust does not parse either one. C1.1's rule holds: `ae-physics-scene` and
@@ -356,10 +377,12 @@ fn set_settings(
     state: tauri::State<'_, App>,
     paths: Paths,
     params: Params,
+    behaviour: settings::Behaviour,
 ) -> Result<(), String> {
     let mut s = state.settings.lock().unwrap();
     s.paths = paths;
     s.params = params;
+    s.behaviour = behaviour;
     settings::save(&app, &s)
 }
 
@@ -408,7 +431,8 @@ pub fn run() {
             probe_paths,
             verify_bake,
             apply_bake,
-            load_viewport
+            load_viewport,
+            focus_ae
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

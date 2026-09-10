@@ -29,6 +29,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { Viewport } from "./viewport";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 // --------------------------------------------------------------------------
 // The shapes we read out of the two documents. Partial on purpose: see above.
@@ -73,7 +74,13 @@ type Params = {
   allow_escapes: boolean;
 };
 
-type Settings = { paths: Paths; params: Params };
+/** How the app behaves, as opposed to what it simulates. A third section
+ *  rather than more fields on `params`, for the same reason `paths` is
+ *  separate: every param is an argument to b3_loop.py and nothing else, and a
+ *  window-management preference is an argument to nothing. */
+type Behaviour = { after_apply: string; autoload_scene: boolean };
+
+type Settings = { paths: Paths; params: Params; behaviour: Behaviour };
 
 type ReadReply = { ok: boolean; text: string; path: string; bytes: number; ms: number };
 
@@ -129,7 +136,11 @@ let saveTimer: number | undefined;
 function persist() {
   window.clearTimeout(saveTimer);
   saveTimer = window.setTimeout(() => {
-    invoke("set_settings", { paths: settings.paths, params: settings.params }).catch((e) =>
+    invoke("set_settings", {
+      paths: settings.paths,
+      params: settings.params,
+      behaviour: settings.behaviour,
+    }).catch((e) =>
       console.error("could not save settings:", e),
     );
   }, 250);
@@ -527,6 +538,41 @@ async function verifyBake() {
 
 
 /**
+ * What happens after the keyframes land.
+ *
+ * The work has moved to After Effects by then, and leaving someone to hunt for
+ * AE behind a window with nothing left to say is a small rudeness the tool can
+ * simply not commit.
+ *
+ * THE ORDER MATTERS. AE is asked to raise itself FIRST and the app steps aside
+ * SECOND. SetForegroundWindow is advisory, and Windows refuses it from a process
+ * that is neither foreground nor recently in receipt of input -- which is the
+ * plug-in's exact situation. So the minimise is what reliably reveals AE, and
+ * the request is what lifts it above whatever else is open. Reversing them
+ * throws away the one moment when the app still holds the foreground to give.
+ *
+ * A refused focus is not an error and is not reported as one.
+ */
+async function handOffToAE() {
+  const mode = settings.behaviour?.after_apply ?? "minimise";
+  if (mode === "stay") return;
+
+  try {
+    await invoke<string>("focus_ae");
+  } catch (e) {
+    invoke("log_js", { message: `focus_ae: ${String(e)}` }).catch(() => {});
+  }
+
+  const w = getCurrentWindow();
+  try {
+    if (mode === "close") await w.close();
+    else await w.minimize();
+  } catch (e) {
+    invoke("log_js", { message: `hand-off: ${String(e)}` }).catch(() => {});
+  }
+}
+
+/**
  * Apply, with Wall K in front of it.
  *
  * The staleness check runs in the BACKEND, before the bridge is touched, so it
@@ -597,6 +643,9 @@ async function applyBake(force = false) {
         : "") +
       bezier +
       `<p class="hint">One Undo puts the comp back.</p>`;
+    // Only on a clean apply. A warning is something to READ, and hiding the
+    // window that is showing it would be perverse.
+    if (!bezier) void handOffToAE();
   } catch (e) {
     fail(String(e), box);
   } finally {
@@ -759,6 +808,11 @@ const int = (s: string) => {
 
 async function boot() {
   settings = await invoke<Settings>("get_settings");
+  // Written before these existed. Rust defaults them too, but a settings
+  // file that failed to parse comes back as Default and these are the two
+  // the front end dereferences before anything checks them.
+  settings.params.layer_params ??= {};
+  settings.behaviour ??= { after_apply: "minimise", autoload_scene: false };
 
   num("gravity", "gravity", float);
   num("ppm", "ppm", float);
@@ -776,9 +830,29 @@ async function boot() {
   $("simulate").addEventListener("click", simulate);
   $("verify").addEventListener("click", verifyBake);
   $("apply").addEventListener("click", () => applyBake(false));
+  const after = $<HTMLSelectElement>("after-apply");
+  after.value = settings.behaviour.after_apply;
+  after.addEventListener("change", () => {
+    settings.behaviour.after_apply = after.value;
+    persist();
+  });
+
+  const auto = $<HTMLInputElement>("autoload-scene");
+  auto.checked = settings.behaviour.autoload_scene;
+  auto.addEventListener("change", () => {
+    settings.behaviour.autoload_scene = auto.checked;
+    persist();
+  });
+
   wireViewport();
   // A bake from a previous session is still worth looking at.
   void loadViewport();
+
+  // Read the comp on launch, if asked. After the viewport, so a bake that is
+  // already there is on screen while AE is being talked to.
+  if (settings.behaviour.autoload_scene) {
+    void readScene();
+  }
   $("probe").addEventListener("click", async () => {
     const out = $("probe-result");
     out.className = "";

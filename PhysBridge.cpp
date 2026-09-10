@@ -2376,6 +2376,63 @@ DoApplyBake(AEGP_SuiteHandler &suites, const BridgeRequest *rP)
 		tally.layers, tally.keys, wall_s * 1000.0, per_key);
 }
 
+/*	Bring After Effects to the front.
+
+	The hand-off at the end of an apply: the keyframes are in the project, so the
+	place to look is AE, not the window that just wrote them. The app minimises
+	itself and asks for this.
+
+	WHY THE PLUG-IN DOES IT RATHER THAN THE APP.
+
+	The app could call SetForegroundWindow with AE's HWND -- it is the foreground
+	process at that moment, so Windows would allow it. But that means teaching the
+	Tauri side about window handles and adding a Win32 dependency to a program
+	that otherwise only moves bytes. The plug-in is already inside AE and already
+	has the headers, and AEGP_GetMainHWND hands it the window directly.
+
+	WHAT IS NOT PROMISED.
+
+	SetForegroundWindow is advisory. Windows refuses it from a process that is not
+	foreground and has not received recent input, which is exactly this plug-in's
+	situation -- so the app minimising itself is what actually reveals AE, and
+	this is the part that raises rather than merely uncovers it. If it is refused,
+	nothing breaks and AE is simply behind where the app used to be. The reply
+	says which happened rather than claiming success either way. */
+static void
+DoFocusAE(AEGP_SuiteHandler &suites)
+{
+	A_Err	err2 = A_Err_NONE, err = A_Err_NONE;
+	HWND	hwnd = NULL;
+
+	ERR2(suites.UtilitySuite6()->AEGP_GetMainHWND(&hwnd));
+
+	if (!hwnd) {
+		PipeWriteError("After Effects did not hand back its main window");
+		return;
+	}
+
+	//	A minimised AE has to be restored first, or it is brought to the front
+	//	as an icon and the user is told the app closed for nothing.
+	if (IsIconic(hwnd)) {
+		ShowWindow(hwnd, SW_RESTORE);
+	}
+
+	BOOL	ok = SetForegroundWindow(hwnd);
+
+	if (!ok) {
+		//	Second try, which is the one that usually works: bring the window to
+		//	the top of the Z-order even when it cannot take input focus.
+		SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
+				SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+	}
+
+	char msg[96];
+
+	sprintf_s(msg, sizeof(msg),
+			"{\"ok\":true,\"foreground\":%s}", ok ? "true" : "false");
+	PipeWriteLine(msg);
+}
+
 // ---------------------------------------------------------------------------
 //	hooks
 // ---------------------------------------------------------------------------
@@ -2401,6 +2458,8 @@ IdleHook(AEGP_GlobalRefcon, AEGP_IdleRefcon, A_long *max_sleepPL)
 			DoBenchKeys(suites, &r);
 		} else if (!strcmp(r.cmd, "apply_bake")) {
 			DoApplyBake(suites, &r);
+		} else if (!strcmp(r.cmd, "focus_ae")) {
+			DoFocusAE(suites);
 		} else if (!strcmp(r.cmd, "_overflow")) {
 			PipeWriteError("the request line exceeded the bridge's cap and "
 							"was refused");

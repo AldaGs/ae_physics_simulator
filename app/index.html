@@ -174,6 +174,36 @@
             <button id="probe" class="ghost">Check these</button>
             <span id="probe-result"></span>
           </div>
+        <fieldset class="behaviour">
+          <legend>Behaviour</legend>
+
+          <label class="field">
+            After applying
+            <small>
+              The keyframes are in the project by then, so the place to look is
+              After Effects. Minimise rather than close by default &mdash;
+              closing throws away the viewport and the parameters that made the
+              bake, and wanting a second look is not unusual.
+            </small>
+            <select id="after-apply">
+              <option value="minimise">minimise, and bring AE forward</option>
+              <option value="close">close, and bring AE forward</option>
+              <option value="stay">stay where it is</option>
+            </select>
+          </label>
+
+          <label class="check">
+            <input id="autoload-scene" type="checkbox" />
+            <span>
+              Read the comp on launch
+              <small>
+                Reading is free and safe. It deliberately does not simulate:
+                that would write a bake over the last one, and doing it to you
+                on launch is a way to lose work you had not applied yet.
+              </small>
+            </span>
+          </label>
+        </fieldset>
           <p class="hint" id="settings-where"></p>
         </details>
       </section>
