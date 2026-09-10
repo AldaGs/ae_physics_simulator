@@ -16,3 +16,7 @@ Win/ARM64/
 # intermediate, not a source, and regenerating it is part of every build.
 PhysBridge_PiPL_temp.rc
 Win/PhysBridge_PiPL_temp.rc
+
+# Visual Studio per-user scratch: solution options, IntelliSense databases,
+# window layout. Machine state, not source.
+Win/.vs/

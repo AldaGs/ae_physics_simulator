@@ -21,10 +21,12 @@
 //! then logs `pipe: client gone`, and the reply -- which is produced later, on
 //! the UI thread, by the idle hook -- is written to nobody:
 //!
-//!     pipe: client connected
-//!     rx: cmd=ping ...
-//!     pipe: client gone
-//!     write: no client connected, 23 bytes dropped
+//! ```text
+//! pipe: client connected
+//! rx: cmd=ping ...
+//! pipe: client gone
+//! write: no client connected, 23 bytes dropped
+//! ```
 //!
 //! 23 bytes is exactly `{"ok":true,"pong":true}`. The request was received and
 //! answered; the answer had nowhere to go.

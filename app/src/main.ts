@@ -66,6 +66,19 @@ type Settings = { paths: Paths; params: Params };
 
 type ReadReply = { ok: boolean; text: string; path: string; bytes: number; ms: number };
 
+/** Wall K's answer. `fresh` is the hash comparison; `reasons` is only what
+ *  the apply script would also have caught, so an empty list with fresh=false
+ *  means the change is geometric. */
+type Verdict = {
+  fresh: boolean;
+  reasons: string[];
+  bake_sha256: string;
+  live_sha256: string;
+  made_at: string;
+  bake_comp: string;
+  live_comp: string;
+};
+
 type SolveResult = {
   ok: boolean;
   refused: boolean;
@@ -277,6 +290,62 @@ async function simulate() {
   }
 }
 
+
+/**
+ * Wall K, asked the only way that can answer it: read the comp AGAIN.
+ *
+ * The bake's `source` block describes the scene; `b2_apply_bake.jsx` can only
+ * see the comp; names and dimensions are the entire overlap. Measured
+ * 2026-09-10: a nudged Position applies anyway and the nudge is overwritten
+ * from keyframe 0. So the shell does what the script structurally cannot.
+ *
+ * A stale bake is REPORTED, not blocked. Re-reading after moving a layer you
+ * did not simulate is a legitimate thing to do, and "this was computed from
+ * different geometry" is the honest sentence -- not "you may not".
+ */
+async function verifyBake() {
+  const btn = $<HTMLButtonElement>("verify");
+  const box = $("verify-result");
+  btn.disabled = true;
+  btn.textContent = "reading comp…";
+  box.hidden = false;
+  box.className = "";
+  box.textContent = "asking AE for the comp as it is now…";
+  try {
+    const v = await invoke<Verdict>("verify_bake");
+    const made = v.made_at ? ` (baked ${esc(v.made_at)})` : "";
+    if (v.fresh) {
+      box.className = "good";
+      box.innerHTML =
+        `<h3>The bake matches the comp</h3>` +
+        `<p>Comp <b>${esc(v.live_comp)}</b>${made} hashes identically to the ` +
+        `scene this bake was computed from.</p>` +
+        `<p class="hint">sha256 ${esc(v.bake_sha256.slice(0, 16))}…</p>`;
+    } else {
+      box.className = "warn";
+      const named = v.reasons.length
+        ? `<ul>${v.reasons.map((r) => `<li>${esc(r)}</li>`).join("")}</ul>`
+        : `<p>Nothing in the comp's <i>identity</i> changed — same name, same ` +
+          `size, same layers. The difference is geometric: a position, a ` +
+          `rotation, a scale or a path is not what it was when this was ` +
+          `simulated. That is the case the apply script cannot see.</p>`;
+      box.innerHTML =
+        `<h3>Stale: this bake was computed from different geometry</h3>` +
+        named +
+        `<p class="hint">bake ${esc(v.bake_sha256.slice(0, 16))}… vs comp ` +
+        `${esc(v.live_sha256.slice(0, 16))}…${made}</p>` +
+        `<p class="hint">Applying it will overwrite the comp with keyframes ` +
+        `computed from geometry that no longer exists. Re-read and simulate ` +
+        `again, unless you meant it.</p>`;
+    }
+  } catch (e) {
+    fail(String(e), box);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Check bake against AE";
+  }
+}
+
 // --------------------------------------------------------------------------
 // Controls
 // --------------------------------------------------------------------------
@@ -347,6 +416,7 @@ async function boot() {
   $("ping").addEventListener("click", ping);
   $("read").addEventListener("click", readScene);
   $("simulate").addEventListener("click", simulate);
+  $("verify").addEventListener("click", verifyBake);
   $("probe").addEventListener("click", async () => {
     const out = $("probe-result");
     out.className = "";

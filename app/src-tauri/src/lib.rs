@@ -23,6 +23,7 @@
 mod bridge;
 mod settings;
 mod solver;
+mod verify;
 
 use settings::{Params, Paths, Settings};
 use std::path::PathBuf;
@@ -65,6 +66,83 @@ fn work_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+/// Ask AE for the active comp, and return the document EXACTLY as it arrived.
+///
+/// Shared by `read_scene` and `verify_bake` on purpose: Wall K's guard compares
+/// a hash of these bytes against the hash B3 recorded, so the two paths must
+/// ask the same question and keep the same answer. Re-serialising here would
+/// re-order keys and re-format floats and break the comparison silently.
+async fn read_scene_bytes(paths: &Paths) -> Result<String, String> {
+    let script = paths.script(READER);
+    if !script.exists() {
+        return Err(format!(
+            "{} is not in the prototype folder.
+
+Set the folder in              Settings -- it is the python-proto/physics_sim checkout, holding              {READER} and {}.",
+            script.display(),
+            solver::SOLVER
+        ));
+    }
+    let payload = serde_json::json!({
+        "cmd": "read_scene",
+        "script": script.display().to_string(),
+    })
+    .to_string();
+
+    let text =
+        tauri::async_runtime::spawn_blocking(move || bridge::request(&payload, READ_TIMEOUT))
+            .await
+            .map_err(|e| format!("the read task did not finish: {e}"))??;
+
+    // The reader reports its own failures as a JSON error rather than a modal,
+    // because a modal raised from the AEGP's idle hook would block AE waiting
+    // for a click nobody is there to give. So a well-formed refusal arrives
+    // here looking exactly like a document, and has to be told apart.
+    let parsed: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+        format!(
+            "the bridge replied with something that is not JSON ({e}):
+
+{}",
+            text.chars().take(400).collect::<String>()
+        )
+    })?;
+    if parsed.get("ok") == Some(&serde_json::Value::Bool(false)) {
+        return Err(parsed
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("the bridge refused the request and did not say why")
+            .to_string());
+    }
+    Ok(text)
+}
+
+/// Wall K: is this bake still the answer to the comp that is open NOW?
+///
+/// Re-reads rather than trusting the bake's own `source` block -- see
+/// `verify.rs` for why the block cannot be trusted and what the apply script
+/// is structurally unable to see.
+#[tauri::command]
+async fn verify_bake(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, App>,
+) -> Result<verify::Verdict, String> {
+    let paths = state.settings.lock().unwrap().paths.clone();
+    let bake_path = work_dir(&app)?.join("bake.json");
+    if !bake_path.exists() {
+        return Err(format!(
+            "there is no bake to check yet ({} does not exist) -- run the              solver first.",
+            bake_path.display()
+        ));
+    }
+    let raw = std::fs::read(&bake_path)
+        .map_err(|e| format!("could not read {}: {e}", bake_path.display()))?;
+    let bake: serde_json::Value = serde_json::from_slice(&raw)
+        .map_err(|e| format!("{} is not JSON ({e})", bake_path.display()))?;
+
+    let live = read_scene_bytes(&paths).await?;
+    verify::compare(&bake, live.as_bytes())
+}
+
 /// The bridge answers `{"ok":true,"pong":true}`, and that is the whole check:
 /// AE is up, the plug-in loaded, and the pipe round-trips.
 #[tauri::command]
@@ -84,52 +162,16 @@ async fn bridge_ping() -> Result<String, String> {
 #[tauri::command]
 async fn read_scene(app: tauri::AppHandle, state: tauri::State<'_, App>) -> Result<Reply, String> {
     let paths = state.settings.lock().unwrap().paths.clone();
-    let script = paths.script(READER);
-    if !script.exists() {
-        return Err(format!(
-            "{} is not in the prototype folder.\n\nSet the folder in \
-             Settings -- it is the python-proto/physics_sim checkout, holding \
-             {READER} and {}.",
-            script.display(),
-            solver::SOLVER
-        ));
-    }
-
-    // The bridge takes an absolute path and reads the file itself, which is
-    // why C0.1's 15,927 bytes went IN as a path rather than as script text.
-    let payload = serde_json::json!({
-        "cmd": "read_scene",
-        "script": script.display().to_string(),
-    })
-    .to_string();
-
     let t0 = Instant::now();
-    let text =
-        tauri::async_runtime::spawn_blocking(move || bridge::request(&payload, READ_TIMEOUT))
-            .await
-            .map_err(|e| format!("the read task did not finish: {e}"))??;
+    let text = read_scene_bytes(&paths).await?;
     let ms = t0.elapsed().as_millis();
-
-    // The reader reports its own failures as a JSON error rather than a modal,
-    // because a modal raised from the AEGP's idle hook would block AE waiting
-    // for a click nobody is there to give. So a well-formed refusal arrives
-    // here looking exactly like a document, and has to be told apart.
-    let parsed: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| format!("the bridge replied with something that is not JSON ({e}):\n\n{}",
-                             text.chars().take(400).collect::<String>()))?;
-    if parsed.get("ok") == Some(&serde_json::Value::Bool(false)) {
-        return Err(parsed
-            .get("error")
-            .and_then(|v| v.as_str())
-            .unwrap_or("the bridge refused the request and did not say why")
-            .to_string());
-    }
 
     let path = work_dir(&app)?.join("scene.json");
     // Written with the bytes that arrived, not re-serialised. C0.1's pass
     // criterion is byte-identity with what the save dialog writes, and a
     // round trip through a JSON library here would quietly re-order keys and
-    // re-format floats -- destroying the one property that was verified.
+    // re-format floats -- destroying the one property that was verified, and
+    // with it the hash Wall K's guard compares against.
     std::fs::write(&path, text.as_bytes())
         .map_err(|e| format!("could not write {}: {e}", path.display()))?;
 
@@ -229,7 +271,8 @@ pub fn run() {
             set_settings,
             settings_path,
             log_js,
-            probe_paths
+            probe_paths,
+            verify_bake
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

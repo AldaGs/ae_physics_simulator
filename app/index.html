@@ -97,6 +97,18 @@
         </label>
 
         <div id="result" hidden></div>
+
+        <!-- Wall K. Separate from Simulate because it asks a different
+             question: not "what happens?" but "is what I already computed
+             still the answer to what is on screen?" -->
+        <div class="row">
+          <button id="verify" class="ghost">Check bake against AE</button>
+          <small>
+            Re-reads the comp and compares it to the bake, because the bake's
+            own source block cannot see a layer you moved.
+          </small>
+        </div>
+        <div id="verify-result" hidden></div>
       </section>
 
       <!-- Machine-shaped, set once. Folded away because it is not the work. -->

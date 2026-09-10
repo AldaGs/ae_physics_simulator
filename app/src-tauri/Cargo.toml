@@ -22,6 +22,9 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Wall K: the shell re-reads the comp and hashes it, because the bake's
+# scene_sha256 is the only field that can catch a geometric edit.
+sha2 = "0.10"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
