@@ -45,6 +45,20 @@
   box-sizing: border-box;
 }
 
+/*  `hidden` has to win.
+
+    The browser's own rule is `[hidden] { display: none }`, which any author
+    rule that sets `display` outranks on specificity. #vp-canvas sets
+    `display: block` and #vp-empty sets `display: flex`, so BOTH stayed on
+    screen when the code set `.hidden = true` -- the empty-state message and
+    the canvas rendered at once and the canvas overflowed its panel.
+
+    Every panel in this app toggles `.hidden`, so this is not a local patch.
+    Anything that sets `display` and is ever hidden has the same bug waiting. */
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   background: var(--bg);
@@ -273,14 +287,58 @@ ul#layers {
   overflow: hidden;
 }
 
+/*  `.row` was used in the markup and never defined, so a button and the
+    <small> explaining it were laid out as inline flow -- the text wrapped
+    around the button and ran past the panel edge. The hint gets its own line
+    rather than sitting beside the control: at 22rem there is not room for both,
+    and a sentence squeezed into 8rem beside a button is not read by anyone. */
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.row > small {
+  flex: 1 1 100%;
+  color: var(--dim, #8b949e);
+  line-height: 1.45;
+}
+
+/*  Name on its own line, detail underneath.
+
+    Three columns across a 20rem panel left the name about 8rem, so
+    "Shape Layer 1" broke onto two lines while the meta -- which is the part
+    you skim, not the part you read -- took the width. Now the name owns the
+    line and cannot wrap, and the meta sits under it. */
 li.layer {
   display: grid;
-  grid-template-columns: 48px 1fr auto;
-  gap: 8px;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-areas:
+    "pin name"
+    "pin meta";
+  column-gap: 8px;
+  row-gap: 2px;
   align-items: baseline;
-  padding: 6px 10px;
+  padding: 7px 10px;
   cursor: pointer;
   border-bottom: 1px solid var(--line);
+}
+
+li.layer .pin {
+  grid-area: pin;
+}
+
+li.layer .name {
+  grid-area: name;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+li.layer .meta {
+  grid-area: meta;
+  font-size: 11px;
 }
 li.layer:last-child {
   border-bottom: none;
@@ -289,6 +347,7 @@ li.layer:hover {
   background: var(--bg);
 }
 li.layer .pin {
+  min-width: 3rem;
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -439,17 +498,21 @@ summary::marker {
 
 /* -- C2 layout: the transport spans the frame ---------------------------- */
 
-#vp-canvas {
-  /* Fills the column and grows with the window rather than sitting at a fixed
-     320px in the middle of the layout. */
+#vp-canvas,
+#vp-empty {
+  /*  Fills the column and grows with the window rather than sitting at a fixed
+      320px in the middle of the layout -- but capped, because 16/9 across a
+      wide middle column is about 640px tall and pushes the transport off the
+      bottom of the screen. The comp is fitted INSIDE whatever box this ends up
+      being (see Viewport.fit), so clamping the height costs nothing but
+      letterboxing. */
   height: auto;
   aspect-ratio: 16 / 9;
-  min-height: 260px;
+  min-height: 240px;
+  max-height: 56vh;
 }
 
 #vp-empty {
-  aspect-ratio: 16 / 9;
-  min-height: 260px;
   display: flex;
   align-items: center;
   justify-content: center;
