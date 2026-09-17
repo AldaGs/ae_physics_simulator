@@ -80,7 +80,45 @@ type Params = {
  *  window-management preference is an argument to nothing. */
 type Behaviour = { after_apply: string; autoload_scene: boolean };
 
-type Settings = { paths: Paths; params: Params; behaviour: Behaviour };
+/** C7.1. Which comp AE says is open, straight off the bridge and NOT out of
+ *  the scene document -- see `comp_identity` in Rust for why that distinction
+ *  is load-bearing rather than tidy. */
+type CompIdentity = {
+  comp_id: number;
+  comp_name: string;
+  project_path: string;
+  project_name: string;
+  saved: boolean;
+};
+
+/** What identifying the comp did to the stored setups. */
+type AdoptReport = {
+  key: string;
+  restored: boolean;
+  fresh: boolean;
+  unidentified: boolean;
+  /** A setup existed under this key and was NOT applied -- unsaved project,
+   *  name disagreed. Holds the name of the setup that was refused. */
+  refused: string;
+  previous: string;
+};
+
+type IdentityReply = { identity: CompIdentity; report: AdoptReport; params: Params };
+
+/** The layer-keyed values found in a settings file written before setups
+ *  existed. Kept, never applied -- see `legacy_setup` in Rust. */
+type Setup = { comp_name: string; statics: string[]; layer_params: Record<string, LayerParams> };
+
+type Settings = {
+  paths: Paths;
+  params: Params;
+  behaviour: Behaviour;
+  setups?: Record<string, Setup>;
+  active_comp?: string;
+  active_comp_name?: string;
+  legacy_setup?: Setup | null;
+  legacy_dismissed?: boolean;
+};
 
 type ReadReply = { ok: boolean; text: string; path: string; bytes: number; ms: number };
 
@@ -194,6 +232,7 @@ function renderScene() {
     ["size", `${c.width} × ${c.height}`],
     ["rate", `${c.fps} fps, ${c.duration_frames} frames`],
     ["schema", scene.schema],
+    setupLine(),
   ]
     .map(([k, v]) => `<dt>${k}</dt><dd>${esc(String(v))}</dd>`)
     .join("");
@@ -349,6 +388,63 @@ function togglePin(id: string) {
   renderScene();
 }
 
+/* C7.1 -- ask AE which comp this is, and load that comp's setup.
+ *
+ * Runs on every read, BEFORE the layer list is reconciled, because `adopt` may
+ * have just replaced the layer-keyed half of `params` -- and reconciling pins
+ * that are about to be swapped out reconciles the wrong list.
+ *
+ * NEVER THROWS. A bridge that is down, a plug-in too old to know the command,
+ * a comp AE would not identify: all of them come back as an unidentified comp,
+ * which is a state the window can show. The alternative is a read that fails
+ * because the SETUP could not be filed, and the read is the thing the person
+ * asked for.
+ */
+let identity: CompIdentity | null = null;
+let adopted: AdoptReport | null = null;
+
+async function identifyComp() {
+  try {
+    const r = await invoke<IdentityReply>("comp_identity");
+    identity = r.identity;
+    adopted = r.report;
+    // Rust is the authority on what is loaded: adopt() may have swapped the
+    // layer-keyed half out from under what is on screen.
+    settings.params = r.params;
+    settings.params.layer_params ??= {};
+  } catch (e) {
+    identity = null;
+    adopted = null;
+    invoke("log_js", { message: `comp_identity: ${e}` }).catch(() => {});
+  }
+}
+
+/** The one line in the Scene panel that says whose parameters these are. */
+function setupLine(): [string, string] {
+  if (!adopted || adopted.unidentified) {
+    return [
+      "setup",
+      "not filed \u2014 After Effects did not identify this comp, so these " +
+        "parameters belong to nothing in particular",
+    ];
+  }
+  const where = identity?.saved
+    ? (identity.project_name || identity.project_path)
+    : "an unsaved project";
+  if (adopted.refused) {
+    return [
+      "setup",
+      `new \u2014 a setup for \u201c${adopted.refused}\u201d was on file ` +
+        `under this key, but this project has never been saved and the comp ` +
+        `names disagree, so it was not applied`,
+    ];
+  }
+  const what = adopted.fresh
+    ? "new, nothing pinned or overridden yet"
+    : "restored";
+  return ["setup", `${what} \u2014 this comp in ${where}`];
+}
+
 async function readScene() {
   const btn = $<HTMLButtonElement>("read");
   btn.disabled = true;
@@ -358,6 +454,11 @@ async function readScene() {
   try {
     const reply = await invoke<ReadReply>("read_scene");
     scene = JSON.parse(reply.text) as Scene;
+
+    // C7.1, and the order matters: this may replace `params.statics` and
+    // `params.layer_params` with the ones belonging to THIS comp, and the
+    // reconciliation below works on exactly those two.
+    await identifyComp();
 
     // Pinning a layer that is no longer in the comp would silently do nothing,
     // and B3 would not complain: --static takes a name it may not find. So the
@@ -893,6 +994,36 @@ async function boot() {
     settings.behaviour.autoload_scene = auto.checked;
     persist();
   });
+
+  /*  C7.1. A settings file written before setups existed carried pins and
+      per-layer masses keyed by layer id with no comp above them -- which is
+      the bug, in stored form. Rust parked them on the way in rather than
+      adopting them for whichever comp happens to be opened first, because
+      that would be the bug being committed one final time, by the fix.
+
+      Said out loud rather than done quietly: somebody who pinned FLOOR and
+      set three masses will notice those are gone, and "the upgrade lost my
+      settings" is a much worse thing to conclude than "the upgrade could not
+      tell which comp they were for, and kept them". */
+  if (settings.legacy_setup && !settings.legacy_dismissed) {
+    const l = settings.legacy_setup;
+    const n = Object.keys(l.layer_params ?? {}).length;
+    document.body.insertAdjacentHTML(
+      "afterbegin",
+      `<div id="legacy-note" class="warn" style="padding:10px 18px">` +
+        `<b>Pins and per-layer physics are now kept per comp.</b> ` +
+        `The previous settings held ${l.statics.length} pinned layer(s) and ` +
+        `${n} layer override(s) with no record of which comp they were for, ` +
+        `so they were not carried over \u2014 a layer id means nothing ` +
+        `without a comp. They are still in the settings file under ` +
+        `<code>legacy_setup</code>. Pin them again on the comp you meant.` +
+        ` <button id="legacy-ok" type="button">Got it</button></div>`,
+    );
+    $("legacy-ok").addEventListener("click", () => {
+      invoke("dismiss_legacy").catch(() => {});
+      $("legacy-note").remove();
+    });
+  }
 
   wireViewport();
   // Tell the plug-in where this executable is, so the Composition menu item

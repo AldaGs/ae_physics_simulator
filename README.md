@@ -37,6 +37,7 @@ AE half. It listens on a local named pipe and answers:
 | `apply_bake` | writes the keyframes **natively**, 131.0 µs/key against ExtendScript's 872.6 |
 | `focus_ae` | brings After Effects to the front after an apply |
 | `register_app` | remembers where the application is, so the menu item can open it |
+| `comp_identity` | the comp's item id and the project's path, so a setup can belong to a comp |
 | `size_probe`, `pipe_probe`, `send_payload`, `bench_keys` | the C0.2 and C0.3 harnesses, kept because every native figure is a comparison against them |
 
 And two menu items:
@@ -172,6 +173,30 @@ Confirm it loaded with **Window → PhysBridge: bridge status**: it reports whet
 a client is connected, how many requests it has served, and the size and
 duration of the last result. A log is also appended to `%TEMP%\physbridge.log`.
 
+### Identity is a request, not a field in the scene
+
+`comp_identity` exists because the shell keys a comp's pins and per-layer
+physics by comp, and the obvious place to put a comp id -- the scene document's
+`comp` block, beside name, width and fps -- is the wrong one.
+
+Wall K hashes the **whole raw scene document** (`app/src-tauri/src/verify.rs`).
+A comp id inside those bytes would survive that, but a **project path** would
+not: Save As between simulate and apply moves the path, moves the hash, and
+makes the staleness guard refuse a bake that is still physically valid. A guard
+that fires on a correct bake is one people learn to click through.
+
+So identity travels as its own request over the same pipe. It is outside the
+hashed bytes by construction rather than by remembering to keep it out,
+`b1_read_shapes.jsx` is untouched, and every scene document captured before
+this existed still hashes to what it hashed before -- which matters, because
+B1's fixture and the September export are evidence rather than just files.
+
+The reply reports rather than infers. An unsaved project has no path and says
+`"saved":false` instead of sending something path-shaped; a comp AE would not
+identify comes back as `comp_id 0`, and the application has a state for that
+which is better than a failed request -- it says the parameters on screen
+belong to nothing in particular.
+
 ## Protocol
 
 Newline-delimited JSON, one request and one reply.
@@ -183,6 +208,7 @@ Newline-delimited JSON, one request and one reply.
 | `{"cmd":"apply_bake","script":"<abs path to bake.json>"}` | key counts and phase timings, or a refusal naming the mismatch |
 | `{"cmd":"focus_ae"}` | `{"ok":true,"foreground":true｜false}` — advisory, and it says which |
 | `{"cmd":"register_app","script":"<abs path to the exe>"}` | `{"ok":true,"registered":true}` |
+| `{"cmd":"comp_identity"}` | `{"ok":true,"comp_id":N,"comp_name":"...","project_path":"...","project_name":"...","saved":true｜false}` |
 | `{"cmd":"size_probe","bytes":"N","mode":"literal"｜"file"}` | a C0.2 report — what was sent, what the script saw |
 | `{"cmd":"size_probe","bytes":"N","echo":"1"}` | the N bytes themselves, for the return direction |
 | `{"cmd":"send_payload","script":"<abs path>","mode":"literal"｜"file"}` | the same report, for a real file |
