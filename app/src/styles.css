@@ -610,3 +610,22 @@ summary::marker {
   opacity: 0.45;
   font-style: italic;
 }
+
+/*  C7.1's upgrade note, which sits above everything else in the window until
+    it is dismissed. Its own rule rather than reusing `#result.warn`: that one
+    is scoped to an id inside a panel, and the three CSS bugs this project
+    already shipped were all a selector that matched nothing -- including a
+    `hidden` that did nothing anywhere. A banner nobody can see is the same
+    failure as no banner, and it is the one the note exists to prevent. */
+#legacy-note {
+  background: var(--warn-bg);
+  border-bottom: 1px solid var(--warn);
+  color: var(--warn);
+  line-height: 1.45;
+}
+#legacy-note code {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+#legacy-note button {
+  margin-left: 8px;
+}

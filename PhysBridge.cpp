@@ -2378,6 +2378,187 @@ DoApplyBake(AEGP_SuiteHandler &suites, const BridgeRequest *rP)
 		tally.layers, tally.keys, wall_s * 1000.0, per_key);
 }
 
+/*	A string ON THE WAY OUT, escaped so the reply is JSON.
+
+	Every reply this plug-in has written until now has been numbers, fixed
+	words, or a document AE itself produced -- so nothing here has ever had to
+	escape anything, and there is no helper for it. `comp_identity` is the
+	first reply carrying a WINDOWS PATH, and a Windows path is backslashes:
+	`C:\Work\p.aep` written raw produces `"C:\W..."`, where \W is not a legal
+	escape. The reply would not parse, and the app's identity call would fail
+	in the one way that looks like "the plug-in is too old".
+
+	Deliberately narrow, exactly as JsonStr coming the other way is: the two
+	characters JSON requires plus the control range, and no \u handling beyond
+	it. What arrives here is already UTF-8 from WideCharToMultiByte and passes
+	through unexamined. Truncation is silent and safe -- the output is always
+	terminated and always balanced, because nothing is ever cut mid-escape. */
+static void
+JsonOutStr(const char *inZ, char *outZ, size_t out_max)
+{
+	size_t	o = 0;
+
+	if (!out_max) {
+		return;
+	}
+	for (const unsigned char *p = (const unsigned char *)inZ; p && *p; p++) {
+		char	esc[8];
+		size_t	n;
+
+		switch (*p) {
+			case '\\':	strcpy_s(esc, sizeof(esc), "\\\\");	break;
+			case '"':	strcpy_s(esc, sizeof(esc), "\\\"");	break;
+			case '\n':	strcpy_s(esc, sizeof(esc), "\\n");	break;
+			case '\r':	strcpy_s(esc, sizeof(esc), "\\r");	break;
+			case '\t':	strcpy_s(esc, sizeof(esc), "\\t");	break;
+			default:
+				if (*p < 0x20) {
+					sprintf_s(esc, sizeof(esc), "\\u%04x", (unsigned)*p);
+				} else {
+					esc[0] = (char)*p;
+					esc[1] = 0;
+				}
+		}
+		n = strlen(esc);
+
+		if (o + n + 1 >= out_max) {
+			break;		//	never cut an escape in half
+		}
+		memcpy(outZ + o, esc, n);
+		o += n;
+	}
+	outZ[o] = 0;
+}
+
+/*	A UTF-16 AEGP_MemHandle as UTF-8, locked, converted, unlocked, freed.
+
+	The same sequence LayerNameUTF8 does, without the name-then-source
+	fallback, which is a layer-name rule and means nothing for a project path.
+	Getting the dispose wrong is a leak per call. */
+static void
+MemHandleUTF8(AEGP_SuiteHandler	&suites,
+			  AEGP_MemHandle	h,
+			  char				*outZ,
+			  size_t			out_max)
+{
+	A_Err			err		= A_Err_NONE,
+					err2	= A_Err_NONE;
+	A_UTF16Char		*uP		= NULL;
+
+	outZ[0] = 0;
+
+	if (!h) {
+		return;
+	}
+	ERR2(suites.MemorySuite1()->AEGP_LockMemHandle(h, (void **)&uP));
+
+	if (uP) {
+		WideCharToMultiByte(CP_UTF8, 0, (LPCWCH)uP, -1,
+			outZ, (int)out_max, NULL, NULL);
+		ERR2(suites.MemorySuite1()->AEGP_UnlockMemHandle(h));
+	}
+	ERR2(suites.MemorySuite1()->AEGP_FreeMemHandle(h));
+}
+
+/*	C7.1 -- which comp is this, and which project is it in?
+
+	WHY THE ANSWER IS NOT IN THE SCENE DOCUMENT
+	-------------------------------------------
+	The obvious place for a comp id is the scene's `comp` block, next to name,
+	width and fps. It is the wrong place, and the roadmap names why: the shell
+	hashes the WHOLE raw scene document for Wall K (verify.rs), so anything
+	added to it changes the hash. A comp id would survive that -- it does not
+	move -- but a PROJECT PATH does: Save As between simulate and apply would
+	change the path, change the hash, and make the staleness guard refuse a
+	bake that is still physically valid. A guard that fires on a correct bake
+	is a guard people learn to click through.
+
+	So identity travels as its own request. It is outside the hashed bytes by
+	construction rather than by remembering to keep it out, `b1_read_shapes.jsx`
+	is not touched, and every scene document captured before today still hashes
+	to what it hashed before -- which matters because B1's fixture and the
+	September export are evidence, not just files.
+
+	THE COMP IS THE ONE `apply_bake` ALREADY USES. `AEGP_GetMostRecentlyUsedComp`
+	rather than the reader's `app.project.activeItem`: those can differ, but
+	DoApplyBake already pairs this call with a document produced by the reader,
+	so using a different one HERE would put a third opinion about "the comp" in
+	a system that currently has two. If that pairing is ever wrong it is wrong
+	for the apply first, which is where it would be found and fixed.
+
+	An unsaved project has no path, and says so rather than sending something
+	that looks like one. The app keys such a setup more weakly and tells the
+	person; see `CompIdentity::key`. */
+static void
+DoCompIdentity(AEGP_SuiteHandler &suites)
+{
+	A_Err		err = A_Err_NONE, err2 = A_Err_NONE;
+	AEGP_CompH	compH = NULL;
+
+	ERR(suites.CompSuite11()->AEGP_GetMostRecentlyUsedComp(&compH));
+
+	if (err || !compH) {
+		PipeWriteError("no comp is open, so there is nothing to identify");
+		return;
+	}
+
+	AEGP_ItemH	itemH	= NULL;
+	A_long		item_id	= 0;
+	char		name[512] = { 0 };
+
+	ERR2(suites.CompSuite11()->AEGP_GetItemFromComp(compH, &itemH));
+
+	if (itemH) {
+		AEGP_MemHandle	nameH = NULL;
+
+		ERR2(suites.ItemSuite9()->AEGP_GetItemID(itemH, &item_id));
+		ERR2(suites.ItemSuite9()->AEGP_GetItemName(S_my_id, itemH, &nameH));
+		MemHandleUTF8(suites, nameH, name, sizeof(name));
+	}
+
+	/*	item_id 0 is not a comp whose id happens to be zero -- AEGP item ids
+		start at 1 -- it is "the call did not answer". Reported as an id of 0
+		rather than as an error, because the app already has a state for an
+		unidentified comp and it is a better one than a failed request: the
+		parameters on screen simply belong to nothing in particular, and it
+		says so. */
+
+	AEGP_ProjectH	projH = NULL;
+	char			path[1024] = { 0 },
+					proj[256] = { 0 };	//	AEGP_MAX_PROJ_NAME_SIZE is 48
+
+	ERR2(suites.ProjSuite6()->AEGP_GetProjectByIndex(0, &projH));
+
+	if (projH) {
+		AEGP_MemHandle	pathH = NULL;
+
+		ERR2(suites.ProjSuite6()->AEGP_GetProjectName(projH, proj));
+		ERR2(suites.ProjSuite6()->AEGP_GetProjectPath(projH, &pathH));
+		MemHandleUTF8(suites, pathH, path, sizeof(path));
+	}
+
+	//	Escaped into their own buffers FIRST: a path is backslashes, and one
+	//	of them a character short of the end is how a reply stops being JSON.
+	char	name_esc[1200] = { 0 },
+			path_esc[2400] = { 0 },
+			proj_esc[600]  = { 0 },
+			msg[4600];
+
+	JsonOutStr(name, name_esc, sizeof(name_esc));
+	JsonOutStr(path, path_esc, sizeof(path_esc));
+	JsonOutStr(proj, proj_esc, sizeof(proj_esc));
+
+	sprintf_s(msg, sizeof(msg),
+			"{\"ok\":true,\"comp_id\":%ld,\"comp_name\":\"%s\","
+			"\"project_path\":\"%s\",\"project_name\":\"%s\","
+			"\"saved\":%s}",
+			(long)item_id, name_esc, path_esc, proj_esc,
+			path[0] ? "true" : "false");
+	Log("  comp_identity: id %ld '%s' in '%s'\n", (long)item_id, name,
+			path[0] ? path : "(unsaved)");
+	PipeWriteLine(msg);
+}
+
 /*	Bring After Effects to the front.
 
 	The hand-off at the end of an apply: the keyframes are in the project, so the
@@ -2575,6 +2756,8 @@ IdleHook(AEGP_GlobalRefcon, AEGP_IdleRefcon, A_long *max_sleepPL)
 			DoFocusAE(suites);
 		} else if (!strcmp(r.cmd, "register_app")) {
 			DoRegisterApp(suites, &r);
+		} else if (!strcmp(r.cmd, "comp_identity")) {
+			DoCompIdentity(suites);
 		} else if (!strcmp(r.cmd, "_overflow")) {
 			PipeWriteError("the request line exceeded the bridge's cap and "
 							"was refused");

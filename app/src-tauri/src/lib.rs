@@ -25,7 +25,7 @@ mod settings;
 mod solver;
 mod verify;
 
-use settings::{Params, Paths, Settings};
+use settings::{AdoptReport, CompIdentity, Params, Paths, Settings};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -70,6 +70,17 @@ struct ApplyReply {
     /// The AEGP's own tally, verbatim -- key counts and phase timings.
     reply: String,
     ms: u128,
+}
+
+/// Which comp AE says is open, what that did to the stored setups, and the
+/// parameters that are now in force. The params come back because `adopt` may
+/// have replaced the layer-keyed half of them, and the controls have to be
+/// redrawn from what is actually loaded rather than from what was on screen.
+#[derive(serde::Serialize)]
+struct IdentityReply {
+    identity: CompIdentity,
+    report: AdoptReport,
+    params: Params,
 }
 
 /// Geometry and keyframes, verbatim. Parsed by the front end, never here.
@@ -371,6 +382,72 @@ async fn verify_bake(
     verify::compare(&bake, live.as_bytes())
 }
 
+/// C7.1 -- which comp is this, and whose setup should be on screen?
+///
+/// WHY THIS IS A BRIDGE COMMAND AND NOT A FIELD IN THE SCENE
+/// --------------------------------------------------------
+/// The roadmap's C7 section names a trap in our own code: Wall K hashes the
+/// WHOLE raw scene document (`verify.rs`), so identity placed inside those
+/// bytes changes the hash. The project path is the sharp end of that -- a
+/// Save As between simulate and apply would move the path, move the hash, and
+/// make the guard refuse a bake that is still physically valid. So identity
+/// must live outside the hashed bytes, and a separate request over the same
+/// pipe is outside them by construction rather than by care.
+///
+/// The reader is untouched as a result. `b1_read_shapes.jsx` emits the same
+/// `ae-physics-scene/2` it emitted yesterday, every scene captured before this
+/// existed still hashes to what it hashed before, and B1's fixture stays
+/// evidence rather than becoming a document from a previous era.
+///
+/// AN UNIDENTIFIED COMP IS A STATE, NOT A FAILURE. An older plug-in answers
+/// `unknown cmd`, and the honest response is to say the parameters on screen
+/// belong to nothing in particular -- not to invent a key and file them under
+/// it, which is how somebody's masses end up on somebody else's comp.
+#[tauri::command]
+async fn comp_identity(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, App>,
+) -> Result<IdentityReply, String> {
+    let reply = tauri::async_runtime::spawn_blocking(move || {
+        bridge::request(r#"{"cmd":"comp_identity"}"#, PING_TIMEOUT)
+    })
+    .await
+    .map_err(|e| format!("the identity task did not finish: {e}"));
+
+    // Every failure below lands in the same place: an empty identity, which
+    // `adopt` reports as `unidentified`. A bridge that is down, a plug-in too
+    // old to know the command, and a reply that is not JSON are all "AE did
+    // not tell us which comp this is", and the window says exactly that.
+    let id: CompIdentity = match reply {
+        Ok(Ok(text)) => serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .filter(|v| v.get("ok") != Some(&serde_json::Value::Bool(false)))
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default(),
+        _ => CompIdentity::default(),
+    };
+
+    // The guard is scoped rather than held to the end of the function: this is
+    // an async command, and a MutexGuard alive across an await is the one way
+    // to make this future non-Send. There is no await below it today, and
+    // scoping it means there cannot be one tomorrow by accident.
+    let (report, params) = {
+        let mut s = state.settings.lock().unwrap();
+        let report = s.adopt(&id);
+        // Saved immediately: `adopt` has just moved the outgoing comp's setup
+        // into the store, and a crash between here and the next control change
+        // would otherwise lose it.
+        settings::save(&app, &s)?;
+        (report, s.params.clone())
+    };
+
+    Ok(IdentityReply {
+        identity: id,
+        report,
+        params,
+    })
+}
+
 /// The bridge answers `{"ok":true,"pong":true}`, and that is the whole check:
 /// AE is up, the plug-in loaded, and the pipe round-trips.
 #[tauri::command]
@@ -456,6 +533,12 @@ fn set_settings(
     s.paths = paths;
     s.params = params;
     s.behaviour = behaviour;
+    // C7.1. The controls write straight into `params` and know nothing about
+    // setups -- which is what keeps `solver.rs` and every existing control
+    // unchanged. This is the one line that files the layer-keyed half under
+    // whichever comp is active, and it has to run on every save or a setup is
+    // only as current as the last comp switch.
+    s.capture();
     settings::save(&app, &s)
 }
 
@@ -467,6 +550,15 @@ fn set_settings(
 #[tauri::command]
 fn log_js(message: String) {
     eprintln!("[ui] {message}");
+}
+
+/// Stop showing the note about parked pre-C7.1 parameters. The values stay on
+/// file; this dismisses a sentence, not the data.
+#[tauri::command]
+fn dismiss_legacy(app: tauri::AppHandle, state: tauri::State<'_, App>) -> Result<(), String> {
+    let mut s = state.settings.lock().unwrap();
+    s.legacy_dismissed = true;
+    settings::save(&app, &s)
 }
 
 #[tauri::command]
@@ -507,7 +599,9 @@ pub fn run() {
             load_viewport,
             preview_scene,
             focus_ae,
-            register_app
+            register_app,
+            comp_identity,
+            dismiss_legacy
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
