@@ -400,6 +400,8 @@ already did.
 | the apply | **131.0 µs/key, 28.6×** the ExtendScript path |
 | C2 the viewport | 15/15 offline, agreeing with `preview.py` at fractional frames |
 | C3 Wall K | refuses a stale bake live, and the override applies |
+| C6.3 rest preview | the comp draws before it is simulated; a bake from another scene is not drawn over it |
+| C7.1 per-comp setup | pins and overrides belong to the comp they were set on |
 
 `SPIKES.md` has the numbers and, more usefully, what each result does **not**
 cover. Two of those limits are worth repeating here:
@@ -415,10 +417,6 @@ cover. Two of those limits are worth repeating here:
 
 ### What is open
 
-- **C6.3** — drawing the scene *before* it is simulated. The viewport draws from
-  `render.json`, which only `b3_loop` produces, so there is nothing to see until
-  a bake exists. Worth doing beyond the convenience: it would give the READER a
-  visual check, which it has never had.
-- **C7** — saving a sim with the project. Waiting on a decision rather than on
+- **C7** (beyond C7.1) — saving a sim with the project. Waiting on a decision rather than on
   work: is a sim part of the artwork or part of the working state? See the
   roadmap.
