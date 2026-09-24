@@ -71,6 +71,7 @@
 	app is wherever it was built. */
 #define PHYSBRIDGE_PREF_SECTION	"PhysBridge"
 #define PHYSBRIDGE_PREF_APP		"app_path"
+#define PHYSBRIDGE_APP_EXE		"AEPhysics.exe"	//	tauri.conf.json mainBinaryName + .exe
 
 //	Distinct from pieFX's names so both plug-ins can be loaded at once. A spike
 //	that forces you to uninstall the thing you are modelling it on is a spike

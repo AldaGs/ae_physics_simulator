@@ -2690,20 +2690,58 @@ DoRegisterApp(AEGP_SuiteHandler &suites, const BridgeRequest *rP)
 	ShellExecute rather than CreateProcess: the app is a normal GUI program, this
 	is exactly the "open this document" case, and it does not leave AE holding
 	handles to a child it has no interest in. */
+/*	The shipped layout: the app sits beside this .aex. That is not a guess --
+	both come out of one release folder -- so when it is there it wins over
+	whatever was registered, and a copy that moved with the plug-in never needs
+	opening by hand. Absent, the registered path still covers dev builds. */
+static bool
+FindBundledApp(char *outZ, size_t outLen)
+{
+	HMODULE	self = NULL;
+	char	path[MAX_PATH];
+
+	if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+			GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			(LPCSTR)&FindBundledApp, &self)) {
+		return false;
+	}
+	DWORD n = GetModuleFileNameA(self, path, MAX_PATH);
+	if (!n || n >= MAX_PATH) {
+		return false;
+	}
+	char *slash = strrchr(path, '\\');
+	if (!slash) {
+		return false;
+	}
+	slash[1] = 0;
+	if (strcat_s(path, sizeof(path), PHYSBRIDGE_APP_EXE)) {
+		return false;
+	}
+	if (GetFileAttributesA(path) == INVALID_FILE_ATTRIBUTES) {
+		return false;
+	}
+	strncpy_s(outZ, outLen, path, _TRUNCATE);
+	return true;
+}
+
 static void
 LaunchApp(AEGP_SuiteHandler &suites)
 {
 	A_Err	err2 = A_Err_NONE, err = A_Err_NONE;
 
+	char	bundled[MAX_PATH];
+	if (FindBundledApp(bundled, sizeof(bundled))) {
+		strncpy_s(S_app_path, sizeof(S_app_path), bundled, _TRUNCATE);
+	}
 	if (!S_app_path[0]) {
 		LoadAppPath(suites);
 	}
 	if (!S_app_path[0]) {
 		ERR2(suites.UtilitySuite3()->AEGP_ReportInfo(S_my_id,
-				"The physics application has not been opened yet, so After "
-				"Effects does not know where it is.\r\r"
-				"Open it once by hand -- it registers itself with this plug-in "
-				"on launch -- and this menu item will work from then on."));
+				"The physics application is not beside this plug-in ("
+				PHYSBRIDGE_APP_EXE "), and has not been opened yet.\r\r"
+				"Put it next to PhysBridge.aex, or open it once by hand -- it "
+				"registers itself on launch -- and this menu item will work."));
 		return;
 	}
 	if (S_connected) {

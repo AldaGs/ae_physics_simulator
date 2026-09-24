@@ -347,12 +347,42 @@ fn load_viewport(app: tauri::AppHandle) -> Result<Viewport, String> {
         render: std::fs::read_to_string(&render)
             .map_err(|e| format!("could not read {}: {e}", render.display()))?,
         bake: if bake.exists() {
-            std::fs::read_to_string(&bake)
-                .map_err(|e| format!("could not read {}: {e}", bake.display()))?
+            let text = std::fs::read_to_string(&bake)
+                .map_err(|e| format!("could not read {}: {e}", bake.display()))?;
+            let scene = std::fs::read(dir.join("scene.json")).unwrap_or_default();
+            if bake_is_for(&text, &scene) { text } else { String::new() }
         } else {
             String::new()
         },
     })
+}
+
+/// Does this bake answer THIS scene? A bake left over from another comp, or
+/// from this comp before its layers moved, would draw every layer at the old
+/// sim's positions -- so it is drawn only when its `scene_sha256` is the hash
+/// of the scene just read, which is Wall K's test. Otherwise the viewport
+/// falls back to rest, the comp as it actually stands. The file is kept.
+fn bake_is_for(bake: &str, scene: &[u8]) -> bool {
+    serde_json::from_str::<serde_json::Value>(bake)
+        .ok()
+        .and_then(|b| b["source"]["scene_sha256"].as_str().map(str::to_owned))
+        .is_some_and(|sha| !scene.is_empty() && sha == verify::sha256_hex(scene))
+}
+
+#[cfg(test)]
+mod viewport_tests {
+    use super::*;
+
+    #[test]
+    fn a_bake_draws_only_over_the_scene_it_was_made_from() {
+        let scene = br#"{"comp":{"name":"A"}}"#;
+        let bake = serde_json::json!({"source": {"scene_sha256": verify::sha256_hex(scene)}})
+            .to_string();
+        assert!(bake_is_for(&bake, scene));
+        assert!(!bake_is_for(&bake, br#"{"comp":{"name":"B"}}"#));
+        assert!(!bake_is_for(&bake, b""));
+        assert!(!bake_is_for(r#"{"frames":[]}"#, scene)); // pre-B3, no source
+    }
 }
 
 /// Wall K: is this bake still the answer to the comp that is open NOW?
